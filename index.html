@@ -3,19 +3,60 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>Simulation : Isovist (Ray casting 2D)</title>
+<title>Urban Sight - Explorez la Perméabilité Visuelle des Espaces en Temps Réel</title>
+
+<!-- Merge/topojson (conserve ton merge.js si nécessaire) -->
+<script src="https://unpkg.com/topojson-server@3.0.1/dist/topojson-server.min.js"></script>
+<script src="https://unpkg.com/topojson-client@3.1.0/dist/topojson-client.min.js"></script>
+<script src="merge.js"></script>
+
+
+
+<script>
+  async function fetchWithRetry(url, options = {}, retries = 4, delay = 1000) {
+    let attempts = 0;
+
+    while (attempts < retries) {
+        try {
+            // On essaie de récupérer les données via fetch
+            const response = await fetch(url, options);
+
+            // Si la réponse est ok (status 200-299), on renvoie la réponse
+            if (response.ok) {
+                return response;
+            } else {
+                // Si la réponse n'est pas ok, on lance une erreur
+                throw new Error(`HTTP error! status: ${response.status}`);
+            }
+        } catch (error) {
+            attempts++;
+
+            if (attempts >= retries) {
+                // Si le nombre d'essais est épuisé, on lance l'erreur finale
+                throw new Error(`Failed after ${retries} attempts: ${error.message}`);
+            }
+
+            // Attendre un certain délai avant de réessayer
+            console.log(`Attempt ${attempts} failed. Retrying in ${delay}ms...`);
+            await new Promise(resolve => setTimeout(resolve, delay));
+        }
+    }
+}
+
+</script>
+
 <style>
   :root{
-    --bg:#0f1720;
+    --bg:#071022;
     --panel:#0b1220;
     --accent:#22c1c3;
     --muted:#94a3b8;
   }
-  html,body{height:100%;margin:0;background:var(--bg);color:#e6eef6;font-family:Inter,ui-sans-serif,system-ui,Segoe UI,Roboto,"Helvetica Neue",Arial}
+  html,body{height:100%;margin:0;background:var(--bg);color:#e6eef6;font-family:Inter,system-ui,Segoe UI,Roboto,Arial}
   .container{display:flex;gap:12px;height:100%;padding:12px;box-sizing:border-box}
-  #canvasWrap{flex:1;border-radius:10px;background:linear-gradient(180deg,#0b1220,#071022);box-shadow:0 8px 30px rgba(2,6,23,0.6);position:relative;overflow:hidden}
-  canvas{width:100%;height:100%;display:block}
-  .panel{width:320px;background:var(--panel);border-radius:10px;padding:14px;box-sizing:border-box;display:flex;flex-direction:column;gap:12px}
+  #canvasWrap{flex:1;border-radius:10px;background:linear-gradient(180deg,#071022,#05111b);box-shadow:0 8px 30px rgba(2,6,23,0.6);position:relative;overflow:hidden}
+  canvas{width:100%;height:100%;display:block;touch-action: none} /* prevent default gestures */
+  .panel{width:360px;background:var(--panel);border-radius:10px;padding:14px;box-sizing:border-box;display:flex;flex-direction:column;gap:12px}
   h1{margin:0;font-size:16px}
   .controls{display:flex;flex-direction:column;gap:8px}
   label{font-size:13px;color:var(--muted)}
@@ -23,56 +64,180 @@
   button{background:transparent;border:1px solid rgba(255,255,255,0.06);padding:8px;border-radius:8px;color:var(--accent);cursor:pointer}
   .small{font-size:13px;color:var(--muted)}
   .footer{margin-top:auto;font-size:12px;color:var(--muted)}
-  .hint{font-size:13px;color:var(--muted);margin-bottom:6px}
+  .status{font-size:13px;color:var(--muted);padding:8px;border-radius:8px;background:rgba(255,255,255,0.02)}
+  .danger{color:#ff7b7b}
+  .success{color:#7bffdf}
+
+  /* search bar overlay (ajoute au style existant) */
+#canvasWrap { position: relative; } /* déjà nécessaire pour position absolute */
+.searchBar{
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  display:flex;
+  gap:8px;
+  align-items:center;
+  background: rgba(11,18,32,0.88);
+  padding:6px 10px;
+  border-radius:10px;
+  box-shadow: 0 6px 18px rgba(0,0,0,0.6);
+  z-index: 50;
+  backdrop-filter: blur(4px);
+  border: 1px solid rgba(255,255,255,0.04);
+}
+.searchBar input{
+  width:360px;
+  max-width: calc(100vw - 160px);
+  padding:8px 10px;
+  border-radius:8px;
+  border:1px solid rgba(255,255,255,0.04);
+  background: rgba(255,255,255,0.02);
+  color: #e6eef6;
+  font-size:14px;
+  outline: none;
+}
+.searchBar input::placeholder{ color: rgba(230,238,246,0.45); }
+.searchBar button{
+  padding:8px 10px;
+  border-radius:8px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  font-size:16px;
+  color: var(--accent);
+}
+.searchBar button:active{ transform: translateY(1px); }
+
+
+
+
+
+
+
+
+
+
+
+/* ======================
+   Loader overlay (ajouter ici)
+   ====================== */
+#loaderOverlay{
+  position: absolute;
+  inset: 0;                 /* top:0; right:0; bottom:0; left:0; */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(2,6,12,0.6);
+  z-index: 60;
+  pointer-events: auto;
+  transition: opacity 220ms ease, visibility 220ms ease;
+  opacity: 1;
+  visibility: visible;
+  backdrop-filter: blur(4px);
+}
+
+#loaderOverlay.hidden{
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+/* card */
+.loader-box{
+  display:flex;
+  gap:12px;
+  align-items:center;
+  background: rgba(11,18,32,0.95);
+  padding: 12px 16px;
+  border-radius: 10px;
+  box-shadow: 0 10px 30px rgba(0,0,0,0.6);
+  border: 1px solid rgba(255,255,255,0.04);
+}
+
+/* spinner */
+.loader-spinner{
+  width:34px;
+  height:34px;
+  border-radius:50%;
+  border:4px solid rgba(255,255,255,0.08);
+  border-top-color: var(--accent);
+  animation: loader-rot 1s linear infinite;
+  box-sizing:border-box;
+}
+
+@keyframes loader-rot{
+  to { transform: rotate(360deg); }
+}
+
+.loader-text{
+  font-size:14px;
+  color: #e6eef6;
+  min-width:160px;
+}
+
+
 </style>
 </head>
 <body>
 <div class="container">
   <div id="canvasWrap">
+     <div class="searchBar" id="searchBar">
+    <input id="addressInput" type="search"
+           placeholder="Rechercher une adresse (ex : 80 Rue Rebeval, Paris)" />
+    <button id="addressSearchBtn" aria-label="Rechercher">🔍</button>
+      </div>
+       <!-- INSÈREZ CE BLOC JUSTE ICI (avant le <canvas>) -->
+     <div id="loaderOverlay" class="hidden" role="status" aria-live="polite" aria-hidden="true">
+       <div class="loader-box">
+         <div class="loader-spinner" aria-hidden="true"></div>
+         <div class="loader-text">Chargement des bâtiments…</div>
+       </div>
+     </div>
     <canvas id="c"></canvas>
   </div>
+
   <div class="panel">
-    <h1>Isovist — Ray casting 2D</h1>
-    <div class="hint">Clique sur la carte pour placer l'observateur.<br>Appuie sur "Générer" pour recréer les bâtiments.</div>
+    <h1>Visualisation de la Perméabilité Visuelle</h1>
 
     <div class="controls">
+      <!--<div class="small">BBox utilisée (Le Marais) :</div>
+      <pre class="small" style="margin:0;background:transparent">south: 48.852, west: 2.349, north: 48.868, east: 2.366</pre>-->
+
+
+      <div class="status" id="status">Aucune donnée chargée.</div>
+
       <label>Nombre de rayons : <span id="rayCountLabel">720</span></label>
-      <input id="rayCount" type="range" min="60" max="2048" step="10" value="720">
+      <input id="rayCount" type="range" min="20" max="500" step="10" value="100">
 
-      <label>Nombre de polygones : <span id="polyCountLabel">25</span></label>
-      <input id="polyCount" type="range" min="5" max="80" step="1" value="25">
+      <label>Rayon max (distance max vue) : <span id="maxDistLabel">200</span> m</label>
+      <input id="maxDist" type="range" min="20" max="200" step="10" value="120">
 
-      <label>Taille max d'un polygone : <span id="polySizeLabel">120</span> px</label>
-      <input id="polySize" type="range" min="30" max="300" step="5" value="120">
-
-      <label>Rayon max (distance max de vue) : <span id="maxDistLabel">1200</span> px</label>
-      <input id="maxDist" type="range" min="200" max="3000" step="50" value="1200">
-
-      <div style="display:flex;gap:8px">
-        <button id="regen">Générer</button>
-        <button id="center">Centrer</button>
-        <button id="toggleRays">Basculer rayons</button>
+      <div style="display:flex;gap:8px;display: none;">
+        <button id="zoomFit">Ajuster vue</button>
       </div>
+
+      <div class="small">La perméabilité visuelle désigne la capacité d'un espace à permettre à la vue de circuler librement, offrant ainsi une connexion visuelle entre différentes zones, qu'elles soient intérieures ou extérieures. Elle influence la perception de l'espace, l'intimité et la circulation des utilisateurs. Ainsi, vous trouverez sur ce site un outil permettant d'évaluer la perméabilité visuelle d'espaces dans le monde entier !</div>
     </div>
 
     <div class="footer">
-      <div class="small">Prototype — approche ray-casting 2D</div>
-      <div class="small" style="margin-top:6px">Astuce : réduire le nombre de rayons sur mobile pour de meilleures performances.</div>
+      <div class="small">Urban Sight — Projection WebMercator & isovist 2D</div>
+      <div class="small" style="margin-top:6px"><a href="https://www.linkedin.com/in/gael-maignan">Gaêl Maignan</a></div>
     </div>
   </div>
 </div>
 
+<!-- osmtogeojson CDN -->
+<script src="https://cdn.jsdelivr.net/npm/osmtogeojson@3.0.0-beta.5/osmtogeojson.min.js"></script>
 <script>
-/*
-  Prototype isovist (ray casting 2D)
-  - click pour définir l'observateur
-  - rayons distribués uniformément
-  - intersection la plus proche avec les arêtes des polygones
+/* -- NOTES :
+   - Implémente pan & zoom en modifiant la bbox mercator (mercBBox).
+   - On stocke les polygones en coordonnées WebMercator (mètres) dans polygonsMerc,
+     puis on reprojette en pixels à chaque draw (donc tuiles & polygones suivent la vue).
 */
 
 const canvas = document.getElementById('c');
 const ctx = canvas.getContext('2d');
-
 let DPR = Math.min(window.devicePixelRatio || 1, 2);
 function resizeCanvas(){
   const rect = canvas.getBoundingClientRect();
@@ -82,98 +247,239 @@ function resizeCanvas(){
 window.addEventListener('resize', () => { resizeCanvas(); draw(); });
 resizeCanvas();
 
-// UI refs
+// UI elements
+const statusEl = document.getElementById('status');
 const rayCountEl = document.getElementById('rayCount');
 const rayCountLabel = document.getElementById('rayCountLabel');
-const polyCountEl = document.getElementById('polyCount');
-const polyCountLabel = document.getElementById('polyCountLabel');
-const polySizeEl = document.getElementById('polySize');
-const polySizeLabel = document.getElementById('polySizeLabel');
 const maxDistEl = document.getElementById('maxDist');
 const maxDistLabel = document.getElementById('maxDistLabel');
-const regenBtn = document.getElementById('regen');
-const centerBtn = document.getElementById('center');
-const toggleRaysBtn = document.getElementById('toggleRays');
+const zoomFitBtn = document.getElementById('zoomFit');
+
+
+
+
+// ---------- Loader DOM refs & helpers (INSÉRER ICI, après statusEl declaration) ----------
+const loaderOverlay = document.getElementById('loaderOverlay');
+const loaderTextEl = loaderOverlay ? loaderOverlay.querySelector('.loader-text') : null;
+const canvasWrap = document.getElementById('canvasWrap');
+
+function showLoader(text = 'Chargement des bâtiments…'){
+  if(!loaderOverlay) return;
+  loaderTextEl && (loaderTextEl.textContent = text);
+  loaderOverlay.classList.remove('hidden');
+  loaderOverlay.setAttribute('aria-hidden','false');
+  // met un indicateur d'état accessible
+  if(canvasWrap) canvasWrap.setAttribute('aria-busy','true');
+}
+
+function hideLoader(){
+  if(!loaderOverlay) return;
+  loaderOverlay.classList.add('hidden');
+  loaderOverlay.setAttribute('aria-hidden','true');
+  if(canvasWrap) canvasWrap.removeAttribute('aria-busy');
+}
+
+
 
 rayCountLabel.textContent = rayCountEl.value;
-polyCountLabel.textContent = polyCountEl.value;
-polySizeLabel.textContent = polySizeEl.value;
 maxDistLabel.textContent = maxDistEl.value;
 
 rayCountEl.addEventListener('input', ()=>{ rayCountLabel.textContent = rayCountEl.value; draw(); });
-polyCountEl.addEventListener('input', ()=>{ polyCountLabel.textContent = polyCountEl.value; });
-polySizeEl.addEventListener('input', ()=>{ polySizeLabel.textContent = polySizeEl.value; });
 maxDistEl.addEventListener('input', ()=>{ maxDistLabel.textContent = maxDistEl.value; draw(); });
-regenBtn.addEventListener('click', ()=>{ generatePolygons(); draw(); });
-centerBtn.addEventListener('click', ()=>{ setObserver(canvas.width/2/DPR, canvas.height/2/DPR); draw(); });
-let showRays = true;
-toggleRaysBtn.addEventListener('click', ()=>{ showRays = !showRays; draw(); });
 
-/* --------------------
-   Génération de polygones aléatoires (bâtiments)
-   - mélange de rectangles et polygones convexes "étoilés"
-   -------------------- */
-let polygons = []; // each polygon = array of points [{x,y},...]
-function rand(min, max){ return Math.random()*(max-min)+min; }
-function randint(a,b){ return Math.floor(rand(a,b+1)); }
+let showRays = false;
 
-function generateRandomConvexPolygon(cx, cy, maxRadius, vertexCount){
-  // sample angles evenly with jitter, radii random
-  const pts = [];
-  const base = 2*Math.PI / vertexCount;
-  for(let i=0;i<vertexCount;i++){
-    const ang = i*base + rand(-base*0.25, base*0.25);
-    const r = rand(maxRadius*0.4, maxRadius);
-    pts.push({x: cx + Math.cos(ang)*r, y: cy + Math.sin(ang)*r});
-  }
-  // compute centroid and sort by angle to ensure non-self-intersecting
-  const cxAvg = pts.reduce((s,p)=>s+p.x,0)/pts.length;
-  const cyAvg = pts.reduce((s,p)=>s+p.y,0)/pts.length;
-  pts.sort((a,b)=>Math.atan2(a.y-cyAvg,a.x-cxAvg) - Math.atan2(b.y-cyAvg,b.x-cxAvg));
-  return pts;
+let adresse = "Versailles"; // pour getCenteredBBox (tu peux modifier)
+
+async function getCenteredBBox(address, halfHeight = 0.0048, halfWidth = 0.010) {
+  const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(address)}&limit=1`;
+  const response = await fetchWithRetry(url, { headers: { "User-Agent": "YourApp/1.0" } });
+  const data = await response.json();
+  if (data.length === 0) throw new Error("Adresse introuvable");
+  const lat = parseFloat(data[0].lat);
+  const lon = parseFloat(data[0].lon);
+  const bbox = { south: lat - halfHeight, north: lat + halfHeight, west: lon - halfWidth, east: lon + halfWidth };
+  return { lat, lon, bbox };
 }
 
-function generatePolygons(){
-  polygons = [];
+
+
+
+
+
+
+
+
+
+/* ---------- Search bar behaviour ---------- */
+const addressInput = document.getElementById('addressInput');
+const addressSearchBtn = document.getElementById('addressSearchBtn');
+
+// préremplir avec valeur par défaut si souhaité
+addressInput.value = adresse || '';
+
+// fonction de recentrage sur l'adresse recherchée
+async function goToAddress(query){
+  if(!query || !query.trim()) return;
+  const q = query.trim();
+  statusEl.textContent = 'Recherche adresse…';
+  try {
+    const data = await getCenteredBBox(q); // TA fonction existante
+    // calcule mercator bbox à partir de data.bbox
+    const sw = lonLatToMercator(data.bbox.west, data.bbox.south);
+    const ne = lonLatToMercator(data.bbox.east, data.bbox.north);
+    mercBBox = {
+      minX: Math.min(sw.x, ne.x),
+      maxX: Math.max(sw.x, ne.x),
+      minY: Math.min(sw.y, ne.y),
+      maxY: Math.max(sw.y, ne.y)
+    };
+
+    // placer l'observer au centre de la vue
+    const midX = (mercBBox.minX + mercBBox.maxX) / 2;
+    const midY = (mercBBox.minY + mercBBox.maxY) / 2;
+    const midP = mercatorToPixel(midX, midY);
+    observer.x = midP.x; observer.y = midP.y;
+
+    // redraw + fetch bâtiments pour la nouvelle vue (débounced)
+    draw();
+    scheduleFetchBuildingsDebounced(200);
+
+    // retourner un message utilisateur
+    statusEl.innerHTML = `<span class="success">Centrée sur "${escapeHtml(q)}" — ${Number(data.lat).toFixed(6)}, ${Number(data.lon).toFixed(6)}</span>`;
+    addressInput.blur();
+  } catch(err){
+    console.warn(err);
+    statusEl.innerHTML = `<span class="danger">Adresse introuvable ou erreur.</span>`;
+  }
+}
+
+// clic sur le bouton
+addressSearchBtn.addEventListener('click', ()=>{ goToAddress(addressInput.value || adresse); });
+
+// Enter dans le champ lance la recherche
+addressInput.addEventListener('keydown', (e) => {
+  if(e.key === 'Enter') {
+    e.preventDefault();
+    goToAddress(addressInput.value || adresse);
+  }
+});
+
+// (optionnel) suggestion rapide : clear status quand on édite
+addressInput.addEventListener('input', ()=>{ if(statusEl) statusEl.textContent = ''; });
+
+
+
+
+
+
+
+
+
+
+
+
+
+// Projection: WebMercator (meters)
+const R = 6378137;
+function lonLatToMercator(lon, lat){
+  const x = R * lon * Math.PI / 180;
+  const y = R * Math.log(Math.tan(Math.PI/4 + (lat * Math.PI/180)/2));
+  return {x,y};
+}
+function mercatorToLonLat(mx, my){
+  const lon = (mx / R) * 180 / Math.PI;
+  const lat = (2 * Math.atan(Math.exp(my / R)) - Math.PI/2) * 180 / Math.PI;
+  return { lon, lat };
+}
+
+// Variables pour la carte / vue
+let mercBBox = null; // {minX,maxX,minY,maxY} en mètres (WebMercator)
+let mapPadding = 0; // px (CSS px)
+let polygonsMerc = []; // tableau de polygones en coordonnées mercator (mètres)
+// polygons (pixels) seront recalculés à chaque draw
+let polygons = []; // pixel version recalculée
+let observer = {x: canvas.width/2/DPR, y: canvas.height/2/DPR}; // origine isovist en px (CSS px)
+let showPolygonsOutline = true;
+
+// helpers mercator <-> pixel (CSS px)
+function mercatorToPixel(mx, my){
   const W = canvas.width / DPR, H = canvas.height / DPR;
-  const count = parseInt(polyCountEl.value,10);
-  const maxSize = parseInt(polySizeEl.value,10);
+  const pad = mapPadding;
+  const minX = mercBBox.minX, maxX = mercBBox.maxX, minY = mercBBox.minY, maxY = mercBBox.maxY;
+  const sx = (W - pad*2) / (maxX - minX);
+  const sy = (H - pad*2) / (maxY - minY);
+  const s = Math.min(sx, sy);
+  const widthMapped = (maxX - minX) * s;
+  const heightMapped = (maxY - minY) * s;
+  const offsetX = (W - widthMapped) / 2;
+  const offsetY = (H - heightMapped) / 2;
+  const px = offsetX + (mx - minX) * s;
+  const py = offsetY + (maxY - my) * s;
+  return {x: px, y: py};
+}
+function pixelToMercator(px, py){
+  const W = canvas.width / DPR, H = canvas.height / DPR;
+  const pad = mapPadding;
+  const minX = mercBBox.minX, maxX = mercBBox.maxX, minY = mercBBox.minY, maxY = mercBBox.maxY;
+  const sx = (W - pad*2) / (maxX - minX);
+  const sy = (H - pad*2) / (maxY - minY);
+  const s = Math.min(sx, sy);
+  const widthMapped = (maxX - minX) * s;
+  const heightMapped = (maxY - minY) * s;
+  const offsetX = (W - widthMapped) / 2;
+  const offsetY = (H - heightMapped) / 2;
+  const mx = minX + (px - offsetX) / s;
+  const my = maxY - (py - offsetY) / s;
+  return {x: mx, y: my};
+}
+function getPxPerMeter(){
+  const W = canvas.width / DPR, H = canvas.height / DPR;
+  const sx = (W - mapPadding*2) / (mercBBox.maxX - mercBBox.minX);
+  const sy = (H - mapPadding*2) / (mercBBox.maxY - mercBBox.minY);
+  return Math.min(sx, sy);
+}
 
-  for(let i=0;i<count;i++){
-    // choose random center but avoid edges
-    const margin = 20;
-    const cx = rand(margin, W-margin);
-    const cy = rand(margin, H-margin);
-
-    // randomly choose rectangle or convex poly
-    if(Math.random() < 0.45){
-      // rectangle
-      const w = rand(maxSize*0.2, maxSize);
-      const h = rand(maxSize*0.2, maxSize);
-      const angle = rand(0, Math.PI*2);
-      const hw = w/2, hh = h/2;
-      const corners = [
-        {x:-hw, y:-hh},{x:hw,y:-hh},{x:hw,y:hh},{x:-hw,y:hh}
-      ].map(p=>{
-        return {
-          x: cx + (p.x*Math.cos(angle) - p.y*Math.sin(angle)),
-          y: cy + (p.x*Math.sin(angle) + p.y*Math.cos(angle))
-        };
+// convert GeoJSON -> polygons en coordonnées mercator (mètres)
+function geojsonToMercatorPolygons(geojson){
+  const polys = [];
+  for(const feat of geojson.features || []){
+    const geom = feat.geometry;
+    if(!geom) continue;
+    if(geom.type === 'Polygon'){
+      const outer = geom.coordinates[0];
+      const ring = outer.map(c => {
+        const m = lonLatToMercator(c[0], c[1]);
+        return {x: m.x, y: m.y};
       });
-      polygons.push(corners);
-    } else {
-      // convex-ish polygon
-      const verts = randint(4,8);
-      polygons.push(generateRandomConvexPolygon(cx,cy, maxSize, verts));
+      if(ring.length >= 3) polys.push(fixPolygonWindingMerc(ring));
+    } else if(geom.type === 'MultiPolygon'){
+      for(const poly of geom.coordinates){
+        const outer = poly[0];
+        const ring = outer.map(c => {
+          const m = lonLatToMercator(c[0], c[1]);
+          return {x: m.x, y: m.y};
+        });
+        if(ring.length >= 3) polys.push(fixPolygonWindingMerc(ring));
+      }
     }
   }
+  return polys;
 }
-generatePolygons();
+function fixPolygonWindingMerc(ring){
+  // compute signed area in mercator coords (we'll compute on pixel-equivalent by using coords as-is)
+  let area = 0;
+  for(let i=0;i<ring.length;i++){
+    const a = ring[i], b = ring[(i+1)%ring.length];
+    area += (a.x*b.y - b.x*a.y);
+  }
+  if(area < 0) ring.reverse();
+  return ring;
+}
 
 /* --------------------
-   Helpers géométriques
-   -------------------- */
-// list all segments from polygons
+   Isovist simulator adapted
+-------------------- */
 function getSegmentsFromPolygons(polys){
   const segs = [];
   for(const poly of polys){
@@ -185,38 +491,7 @@ function getSegmentsFromPolygons(polys){
   }
   return segs;
 }
-
-// intersection entre un rayon p + t*r (t>=0) et segment q + u*s (0<=u<=1)
-// retourne {x,y,t,u} ou null si pas d'intersection
-function intersectRaySegment(px,py, rx,ry, sx1,sy1, sx2,sy2){
-  // ray: P + t*R where R = (rx,ry)
-  // seg: S1 + u*(S2-S1)
-  const r = {x: rx, y: ry};
-  const s = {x: sx2 - sx1, y: sy2 - sy1};
-  const q = {x: sx1 - px, y: sy1 - py};
-
-  const rxs = r.x * s.y - r.y * s.x;
-  const qxr = q.x * r.y - q.y * r.x;
-
-  if (Math.abs(rxs) < 1e-9){
-    // parallel
-    return null;
-  }
-  const u = qxr / rxs;
-  const qxs = q.x * s.y - q.y * s.x;
-  const t = qxs / rxs;
-
-  // here we derived u and t with signs - double check orientation
-  // We need t >= 0 (on ray) and u in [0,1] (on segment)
-  if (t >= 0 && u >= 0 && u <= 1){
-    return { x: px + t * r.x, y: py + t * r.y, t: t, u: u };
-  }
-  return null;
-}
-
-// safer, alternate formula (avoid confusion) - use vector cross method
 function intersectRaySeg2(px,py, dirx,diry, x1,y1,x2,y2){
-  // solve P + t*D = A + u*(B-A)
   const ax = x1, ay = y1;
   const bx = x2, by = y2;
   const dx = dirx, dy = diry;
@@ -230,133 +505,200 @@ function intersectRaySeg2(px,py, dirx,diry, x1,y1,x2,y2){
   }
   return null;
 }
-
-/* --------------------
-   Ray casting : pour un origine, lancer N rayons et trouver intersections
-   -------------------- */
-let observer = {x: canvas.width/2/DPR, y: canvas.height/2/DPR};
-let segments = getSegmentsFromPolygons(polygons);
-
-function setObserver(x,y){
-  observer.x = x;
-  observer.y = y;
-}
-
-// écoute clic
-canvas.addEventListener('pointermove', (e)=>{
-  const rect = canvas.getBoundingClientRect();
-  const x = (e.clientX - rect.left) * (canvas.width / rect.width) / DPR;
-  const y = (e.clientY - rect.top) * (canvas.height / rect.height) / DPR;
-  setObserver(x,y);
-  draw();
-});
-
 function computeIsovist(origin, numRays, maxDist){
   const pts = [];
-  const W = canvas.width/DPR, H = canvas.height/DPR;
   const segs = getSegmentsFromPolygons(polygons);
   for(let i=0;i<numRays;i++){
     const ang = (i/numRays) * Math.PI * 2;
     const dx = Math.cos(ang);
     const dy = Math.sin(ang);
-
     let nearest = null;
     let nearestT = Infinity;
-
-    // cast ray - check every segment
     for(const s of segs){
-      // intersection
       const it = intersectRaySeg2(origin.x, origin.y, dx, dy, s.a.x, s.a.y, s.b.x, s.b.y);
       if(it && it.t < nearestT){
         nearestT = it.t;
         nearest = {x: it.x, y: it.y};
       }
     }
-
     if(nearest){
-      // clamp to maxDist if too far
       const dist = Math.hypot(nearest.x - origin.x, nearest.y - origin.y);
-      if(dist > maxDist){
-        pts.push({x: origin.x + dx*maxDist, y: origin.y + dy*maxDist});
-      } else pts.push(nearest);
+      if(dist > maxDist) pts.push({x: origin.x + dx*maxDist, y: origin.y + dy*maxDist});
+      else pts.push(nearest);
     } else {
-      // no intersection -> ray reaches maxDist
       pts.push({x: origin.x + dx*maxDist, y: origin.y + dy*maxDist});
     }
   }
-
-  // Optionnel : simplifier / réduire points en supprimant voisins colinéaires (non fait ici)
   return pts;
 }
 
 /* --------------------
-   Dessin
-   -------------------- */
+   Tile background (OpenStreetMap / Carto dark)
+-------------------- */
+const tileSize = 256; // tile pixel size (CSS px)
+const initialResolution = 2 * Math.PI * R / tileSize; // meters per pixel at zoom 0
+const tileCache = {}; // url -> Image | 'loading' | 'error'
+
+function lonToTileX(lon, z){
+  return (lon + 180) / 360 * Math.pow(2, z);
+}
+function latToTileY(lat, z){
+  const latRad = lat * Math.PI / 180;
+  return (1 - Math.log(Math.tan(latRad) + 1/Math.cos(latRad)) / Math.PI) / 2 * Math.pow(2, z);
+}
+function tileXToLon(x, z){
+  return x / Math.pow(2,z) * 360 - 180;
+}
+function tileYToLat(y, z){
+  const n = Math.PI - 2 * Math.PI * y / Math.pow(2,z);
+  return (180/Math.PI) * Math.atan(0.5*(Math.exp(n) - Math.exp(-n)));
+}
+
+function computeZoomFromScale(){
+  const W = canvas.width / DPR;
+  const minX = mercBBox.minX, maxX = mercBBox.maxX;
+  const sx = (W - mapPadding*2) / (maxX - minX);
+  const s = sx;
+  const approxZ = Math.log2(initialResolution * s);
+  let z = Math.round(approxZ);
+  z = Math.max(0, Math.min(19, z));
+  return z;
+}
+
+function drawTiles(){
+  if(!mercBBox) return;
+  const z = computeZoomFromScale();
+
+  const sw = mercatorToLonLat(mercBBox.minX, mercBBox.minY);
+  const ne = mercatorToLonLat(mercBBox.maxX, mercBBox.maxY);
+
+  const txMin = Math.floor(lonToTileX(sw.lon, z));
+  const txMax = Math.ceil(lonToTileX(ne.lon, z));
+  const tyMin = Math.floor(latToTileY(ne.lat, z));
+  const tyMax = Math.ceil(latToTileY(sw.lat, z));
+
+  for(let tx = txMin; tx <= txMax; tx++){
+    for(let ty = tyMin; ty <= tyMax; ty++){
+      const wrapX = ((tx % Math.pow(2,z)) + Math.pow(2,z)) % Math.pow(2,z);
+      const url = `https://a.basemaps.cartocdn.com/dark_all/${z}/${wrapX}/${ty}.png`;
+      const tlLon = tileXToLon(tx, z);
+      const tlLat = tileYToLat(ty, z);
+      const brLon = tileXToLon(tx + 1, z);
+      const brLat = tileYToLat(ty + 1, z);
+      const tlM = lonLatToMercator(tlLon, tlLat);
+      const brM = lonLatToMercator(brLon, brLat);
+      const tlP = mercatorToPixel(tlM.x, tlM.y);
+      const brP = mercatorToPixel(brM.x, brM.y);
+      const dx = tlP.x, dy = tlP.y;
+      const dw = brP.x - tlP.x;
+      const dh = brP.y - tlP.y;
+
+      ctx.fillStyle = 'rgba(4,10,16,1)';
+      ctx.fillRect(dx, dy, dw, dh);
+
+      const cacheKey = url;
+      const cached = tileCache[cacheKey];
+      if(cached && cached instanceof Image && cached.complete && cached.naturalWidth){
+        try { ctx.drawImage(cached, dx, dy, dw, dh); } catch(e) { }
+      } else if(cached === 'loading' || cached === 'error'){
+        // placeholder already drawn
+      } else {
+        tileCache[cacheKey] = 'loading';
+        const img = new Image();
+        img.crossOrigin = 'Anonymous';
+        img.onload = () => { tileCache[cacheKey] = img; draw(); };
+        img.onerror = () => { tileCache[cacheKey] = 'error'; };
+        img.src = url;
+      }
+    }
+  }
+}
+
+/* --------------------
+   Drawing
+-------------------- */
 function clear(){
   ctx.clearRect(0,0,canvas.width,canvas.height);
-  // background
-  ctx.fillStyle = '#071022';
+  ctx.fillStyle = '#05111b';
   ctx.fillRect(0,0,canvas.width,canvas.height);
+}
+function drawGrid(){
+  const W = canvas.width/DPR, H = canvas.height/DPR;
+  const step = 100;
+  ctx.save();
+  ctx.scale(DPR, DPR);
+  ctx.strokeStyle = 'rgba(255,255,255,0.02)';
+  ctx.lineWidth = 1;
+  for(let x=0;x<=W;x+=step){ ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,H); ctx.stroke(); }
+  for(let y=0;y<=H;y+=step){ ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(W,y); ctx.stroke(); }
+  ctx.restore();
 }
 
 function draw(){
   resizeCanvas();
   clear();
+  if(!mercBBox) { ctx.save(); ctx.scale(DPR,DPR); ctx.restore(); return; }
+
+  // Recompute pixel polygons from polygonsMerc before drawing & collision
+  polygons = polygonsMerc.map(ring => ring.map(m => mercatorToPixel(m.x, m.y)));
 
   ctx.save();
-  ctx.scale(DPR, DPR); // draw in CSS pixels coordinates
+  ctx.scale(DPR, DPR);
 
-  // draw grid
+  // draw tiles
+  drawTiles();
+
+  // grid on top
   drawGrid();
 
-  // draw polygons (bâtiments)
-  ctx.lineWidth = 1;
-  ctx.strokeStyle = 'rgba(255,255,255,0.06)';
-  ctx.fillStyle = 'rgba(200,210,220,0.06)';
-  for(const poly of polygons){
-    ctx.beginPath();
-    for(let i=0;i<poly.length;i++){
-      const p = poly[i];
-      if(i===0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y);
-    }
-    ctx.closePath();
-    ctx.fill();
-    ctx.stroke();
-  }
+  
 
-  const numRays = parseInt(rayCountEl.value,10);
-  const maxDist = parseFloat(maxDistEl.value,10);
+const numRays = parseInt(rayCountEl.value,10);
 
-  // compute isovist
+ const maxDistMeters = parseFloat(maxDistEl.value, 10) || 0;
+  let pxPerMeter = getPxPerMeter();
+  if(!isFinite(pxPerMeter) || pxPerMeter <= 0) pxPerMeter = 1;
+  let maxDist = maxDistMeters * pxPerMeter;
+  if(!isFinite(maxDist) || maxDist <= 0) maxDist = 100;
+
   const isoPts = computeIsovist(observer, numRays, maxDist);
 
-  // draw isovist fill
+
   if(isoPts && isoPts.length>2){
     ctx.beginPath();
     ctx.moveTo(isoPts[0].x, isoPts[0].y);
     for(let i=1;i<isoPts.length;i++) ctx.lineTo(isoPts[i].x, isoPts[i].y);
     ctx.closePath();
-    // gradient fill
     const g = ctx.createRadialGradient(observer.x, observer.y, 1, observer.x, observer.y, Math.min(maxDist, Math.hypot(canvas.width,canvas.height)));
-    g.addColorStop(0, 'rgba(34,193,195,0.18)');
+    g.addColorStop(0, 'rgba(34,193,195,0.38)');
     g.addColorStop(1, 'rgba(34,193,195,0.02)');
     ctx.fillStyle = g;
     ctx.fill();
-    // outline
     ctx.strokeStyle = 'rgba(34,193,195,0.9)';
     ctx.lineWidth = 1.2;
     ctx.stroke();
   }
 
-  // optional draw rays
   if(showRays){
-    ctx.lineWidth = 0.4;
-    ctx.strokeStyle = 'rgba(255,255,255,0.06)';
+    ctx.lineWidth = 0.35;
+    ctx.strokeStyle = 'rgba(255,255,255,0.4)';
     ctx.beginPath();
-    for(const p of isoPts){
-      ctx.moveTo(observer.x, observer.y);
-      ctx.lineTo(p.x, p.y);
+    for(const p of isoPts){ ctx.moveTo(observer.x, observer.y); ctx.lineTo(p.x, p.y); }
+    ctx.stroke();
+  }
+
+  // draw polygons (bâtiments)
+  ctx.lineWidth = -2;
+  ctx.strokeStyle = 'rgba(44,54,64,0.4)';
+  ctx.fillStyle = 'rgba(16,28,38,1)';
+  for(const poly of polygons){
+    ctx.beginPath();
+    for(let i=0;i<poly.length;i++){
+      const p = poly[i];
+      if(i===0) ctx.moveTo(p.x,p.y); else ctx.lineTo(p.x,p.y);
     }
+    ctx.closePath();
+    ctx.fill();
     ctx.stroke();
   }
 
@@ -371,63 +713,582 @@ function draw(){
   ctx.arc(observer.x, observer.y, 6, 0, Math.PI*2);
   ctx.stroke();
 
-  // draw facade outlines with light strokes for depth
-  ctx.lineWidth = 0.9;
-  ctx.strokeStyle = 'rgba(255,255,255,0.06)';
-  for(const poly of polygons){
-    ctx.beginPath();
-    for(let i=0;i<poly.length;i++){
-      const p = poly[i];
-      if(i===0) ctx.moveTo(p.x,p.y); else ctx.lineTo(p.x,p.y);
+  // outlines
+  if(showPolygonsOutline){
+    ctx.lineWidth = 0.9;
+    ctx.strokeStyle = 'rgba(255,255,255,0.06)';
+    for(const poly of polygons){
+      ctx.beginPath();
+      for(let i=0;i<poly.length;i++){
+        const p = poly[i];
+        if(i===0) ctx.moveTo(p.x,p.y); else ctx.lineTo(p.x,p.y);
+      }
+      ctx.closePath();
+      ctx.stroke();
     }
-    ctx.closePath();
-    ctx.stroke();
   }
 
   ctx.restore();
 }
 
-// small grid in background
-function drawGrid(){
-  const W = canvas.width/DPR, H = canvas.height/DPR;
-  const step = 50;
-  ctx.save();
-  ctx.strokeStyle = 'rgba(255,255,255,0.02)';
-  ctx.lineWidth = 1;
-  for(let x=0;x<=W;x+=step){
-    ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,H); ctx.stroke();
+/* --------------------
+   Mouse handling: isovist suit la souris
+   + pan & zoom
+-------------------- */
+canvas.addEventListener('pointermove', (e)=>{
+  // observer follows mouse
+  const rect = canvas.getBoundingClientRect();
+  const x = (e.clientX - rect.left);
+  const y = (e.clientY - rect.top);
+  observer.x = x;
+  observer.y = y;
+  draw();
+});
+canvas.addEventListener('contextmenu', (e)=>e.preventDefault());
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+let fetchAbortController = null;
+let fetchDebounceTimer = null;
+const FETCH_DEBOUNCE_MS = 350; // délai après lequel on déclenche la requête (après la dernière interaction)
+const BBOX_BUFFER_FACTOR = 0.10; // étend la bbox de 10% pour charger un peu au-delà de la vue (prévenir les bords)
+
+function getLonLatBBoxFromMercBBox(mb){
+  const sw = mercatorToLonLat(mb.minX, mb.minY);
+  const ne = mercatorToLonLat(mb.maxX, mb.maxY);
+  return { south: sw.lat, west: sw.lon, north: ne.lat, east: ne.lon };
+}
+function expandMercBBox(mb, factor = BBOX_BUFFER_FACTOR){
+  const width = mb.maxX - mb.minX;
+  const height = mb.maxY - mb.minY;
+  const padX = width * factor;
+  const padY = height * factor;
+  return {
+    minX: mb.minX - padX,
+    maxX: mb.maxX + padX,
+    minY: mb.minY - padY,
+    maxY: mb.maxY + padY
+  };
+}
+function getMercBBoxFromGeojson(geojson){
+  let minX=Infinity, minY=Infinity, maxX=-Infinity, maxY=-Infinity;
+  for(const feat of geojson.features || []){
+    const geom = feat.geometry;
+    if(!geom) continue;
+    const polys = (geom.type === 'Polygon') ? [geom.coordinates] : (geom.type === 'MultiPolygon' ? geom.coordinates : []);
+    for(const poly of polys){
+      const ring = poly[0];
+      for(const coord of ring){
+        const lon = coord[0], lat = coord[1];
+        const m = lonLatToMercator(lon, lat);
+        if(m.x < minX) minX = m.x;
+        if(m.x > maxX) maxX = m.x;
+        if(m.y < minY) minY = m.y;
+        if(m.y > maxY) maxY = m.y;
+      }
+    }
   }
-  for(let y=0;y<=H;y+=step){
-    ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(W,y); ctx.stroke();
-  }
-  ctx.restore();
+  if(minX === Infinity) return null;
+  return { minX, maxX, minY, maxY };
 }
 
-/* --------------------
-   Initial placement & animation
-   -------------------- */
-setObserver(canvas.width/2/DPR, canvas.height/2/DPR);
-draw();
+async function fetchBuildingsForView({useViewMercBBox=true, expand=true} = {}){
+  if(!mercBBox) {
+    statusEl.textContent = 'Impossible : mercBBox non initialisée.';
+    return;
+  }
 
-// simple animation loop not necessary but keeps DPR updated
-let raf;
-function loop(){
-  // nothing animated constantly; just keep running for responsiveness when resizing or interacting
-  raf = requestAnimationFrame(loop);
+   // show loader when we start fetching buildings
+  showLoader('Récupération des bâtiments pour la vue…');
+
+  // abort previous fetch if en cours
+  if(fetchAbortController){
+    try{ fetchAbortController.abort(); }catch(_){}
+    fetchAbortController = null;
+  }
+  fetchAbortController = new AbortController();
+  const signal = fetchAbortController.signal;
+
+  statusEl.textContent = 'Récupération des bâtiments pour la vue courante…';
+  statusEl.className = 'status';
+
+  try{
+    // Compose bbox from current view (optionnellement étendue)
+    const bboxMerc = expand ? expandMercBBox(mercBBox, BBOX_BUFFER_FACTOR) : mercBBox;
+    const lonlatBbox = getLonLatBBoxFromMercBBox(bboxMerc);
+
+    const overpassQuery = `[out:json][timeout:60];
+    (
+      way["building"](${lonlatBbox.south},${lonlatBbox.west},${lonlatBbox.north},${lonlatBbox.east});
+      relation["building"](${lonlatBbox.south},${lonlatBbox.west},${lonlatBbox.north},${lonlatBbox.east});
+    );
+    out body;
+    >;
+    out skel qt;`;
+
+    const res = await fetchWithRetry('https://overpass-api.de/api/interpreter', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
+      body: 'data=' + encodeURIComponent(overpassQuery),
+      signal
+    });
+    if(!res.ok) throw new Error(`Overpass HTTP ${res.status} ${res.statusText}`);
+    const osmJson = await res.json();
+    const geojson2 = osmtogeojson(osmJson);
+
+    if(!geojson2 || !geojson2.features || geojson2.features.length === 0){
+      statusEl.innerHTML = '<span class="danger">Aucune feature retournée par Overpass pour cette vue.</span>';
+      polygonsMerc = [];
+      draw();
+      return;
+    }
+
+    // optional: filter tiny polygons
+    geojson2.features = geojson2.features.filter(f => {
+      try {
+        const coords = (f.geometry.type === 'Polygon') ? f.geometry.coordinates[0] : (f.geometry.type === 'MultiPolygon' ? f.geometry.coordinates[0][0] : []);
+        if(!coords || coords.length < 4) return false;
+        let minx=Infinity, miny=Infinity, maxx=-Infinity, maxy=-Infinity;
+        for(const c of coords){ minx=Math.min(minx,c[0]); maxx=Math.max(maxx,c[0]); miny=Math.min(miny,c[1]); maxy=Math.max(maxy,c[1]); }
+        const bboxArea = (maxx-minx)*(maxy-miny);
+        return bboxArea > 1e-9;
+      } catch(e){ return true; }
+    });
+
+    // merge touching buildings if mergeTouchingFeatures available
+    const mergedGeo = (typeof mergeTouchingFeatures === 'function') ? mergeTouchingFeatures(geojson2) : geojson2;
+
+    // convert to mercator polygons (NE PAS remplacer mercBBox global)
+    polygonsMerc = geojsonToMercatorPolygons(mergedGeo);
+
+    // compute stats-only bbox (non assignée)
+    const geoMercBBox = getMercBBoxFromGeojson(mergedGeo);
+
+    if(polygonsMerc.length === 0){
+      statusEl.innerHTML = '<span class="danger">Conversion OK mais aucun polygon utilisable.</span>';
+    } else {
+      statusEl.innerHTML = '<span class="success">Chargé : ' + polygonsMerc.length + ' polygones (unités) pour la vue actuelle.</span>';
+      // center observer dans la vue (optionnel) : on conserve la vue, mais recentre l'observer si il était hors écran
+      const midX = (mercBBox.minX + mercBBox.maxX)/2;
+      const midY = (mercBBox.minY + mercBBox.maxY)/2;
+      const midP = mercatorToPixel(midX, midY);
+      // ne pas forcer si utilisateur a déplacé le curseur — seulement si observer est en dehors du canvas
+      if(observer.x < 0 || observer.y < 0 || observer.x > canvas.width/DPR || observer.y > canvas.height/DPR){
+        observer.x = midP.x; observer.y = midP.y;
+      }
+      draw();
+    }
+  } catch(err){
+    if(err.name === 'AbortError'){
+      console.warn('Fetch Overpass annulé (nouvelle requête).');
+      return;
+    }
+    console.error(err);
+    statusEl.innerHTML = `<span class="danger">Erreur: ${escapeHtml(err.message || String(err))} — possible CORS ou indisponibilité Overpass.</span>`;
+  } finally {
+    fetchAbortController = null;
+    hideLoader();
+  }
 }
-loop();
 
-/* --------------------
-   Keyboard shortcuts
-   -------------------- */
-window.addEventListener('keydown', (e)=>{
-  if(e.key === 'r') { generatePolygons(); draw(); }
+// Debounce helper (réinitialise timer)
+function scheduleFetchBuildingsDebounced(delay = FETCH_DEBOUNCE_MS){
+  if(fetchDebounceTimer) clearTimeout(fetchDebounceTimer);
+  fetchDebounceTimer = setTimeout(()=>{ fetchBuildingsForView({useViewMercBBox:true, expand:true}); fetchDebounceTimer = null; }, delay);
+}
+// Immediate fetch (cancels debounce)
+function fetchBuildingsImmediately(){
+  if(fetchDebounceTimer) { clearTimeout(fetchDebounceTimer); fetchDebounceTimer = null; }
+  fetchBuildingsForView({useViewMercBBox:true, expand:true});
+}
+
+/* --- Hook events to trigger fetches at end of interactions --- */
+
+// adapt wheel handler: déjà existant — on zoom change, schedule une fetch
+// Remplace l'appel de draw() existant dans le handler wheel par draw() + scheduleFetchBuildingsDebounced()
+// (dans ton code existant, le draw() est appelé à la fin du wheel handler) — on ajoute scheduling.
+// Exemple : (dans ton handler wheel existant) -> après modification :
+//
+// mercBBox.minX = newMinX; mercBBox.maxX = newMaxX;
+// mercBBox.minY = newMinY; mercBBox.maxY = newMaxY;
+// draw();
+// scheduleFetchBuildingsDebounced();
+//
+// Pour être sûr, on actualise le handler wheel ci-dessous (remplace l'ancien) :
+
+canvas.addEventListener('wheel', (e)=>{
+  if(!mercBBox) return;
+  e.preventDefault();
+  const rect = canvas.getBoundingClientRect();
+  const px = e.clientX - rect.left;
+  const py = e.clientY - rect.top;
+  const centerM = pixelToMercator(px, py);
+  const zoomFactor = Math.exp(-e.deltaY * 0.002);
+  if(!isFinite(zoomFactor) || zoomFactor <= 0) return;
+
+  const minX = mercBBox.minX, maxX = mercBBox.maxX, minY = mercBBox.minY, maxY = mercBBox.maxY;
+  const newMinX = centerM.x - (centerM.x - minX) / zoomFactor;
+  const newMaxX = centerM.x + (maxX - centerM.x) / zoomFactor;
+  const newMinY = centerM.y - (centerM.y - minY) / zoomFactor;
+  const newMaxY = centerM.y + (maxY - centerM.y) / zoomFactor;
+
+  const minWidth = 2.0;
+  const newWidth = newMaxX - newMinX;
+  if(newWidth < minWidth) return;
+
+  mercBBox.minX = newMinX; mercBBox.maxX = newMaxX;
+  mercBBox.minY = newMinY; mercBBox.maxY = newMaxY;
+
+  draw();
+
+  // schedule fetch after wheel activity stops
+  scheduleFetchBuildingsDebounced();
+}, { passive: false });
+
+// Pan: dans pointerup (fin du drag) on déclenche une fetch immédiate
+// Ton handler pointerup existant doit appeler fetchBuildingsImmediately() si un drag a eu lieu.
+// Voici un remplacement / extension minimal de ton pointerup actuel :
+
+canvas.addEventListener('pointerup', (e)=>{
+  if(isDragging){
+    isDragging = false;
+    try{ canvas.releasePointerCapture(e.pointerId); }catch(_){}
+    // fetch buildings now that pan finished
+    fetchBuildingsImmediately();
+  }
+});
+
+// Dans pointercancel aussi
+canvas.addEventListener('pointercancel', (e)=>{
+  if(isDragging) {
+    isDragging = false;
+    try{ canvas.releasePointerCapture(e.pointerId); }catch(_){}
+    fetchBuildingsImmediately();
+  }
+});
+
+// Expose le bouton de récupération pour qu'il déclenche la nouvelle fonction
+//fetchBtn.removeEventListener && fetchBtn.removeEventListener('click', ()=>{}); // safe remove if any
+//fetchBtn.addEventListener('click', ()=>{ fetchBuildingsForView({useViewMercBBox:true, expand:true}); });
+
+function zoomFit(){
+  if(!mercBBox) return;
+  const midX = (mercBBox.minX + mercBBox.maxX)/2;
+  const midY = (mercBBox.minY + mercBBox.maxY)/2;
+  const midP = mercatorToPixel(midX, midY);
+  observer.x = midP.x; observer.y = midP.y;
+  draw();
+  scheduleFetchBuildingsDebounced(200);
+}
+
+// Optionnel : recharger après zoomFit (si tu veux)
+zoomFitBtn.addEventListener('click', ()=>{
+  zoomFit();
+});
+
+/* --- initial : après calcul initial de mercBBox on lance un fetch pour remplir la vue --- */
+// Remplace le then() existant sur getCenteredBBox(...) en bas de ton script par ceci :
+//
+// getCenteredBBox(adresse).then(data=>{
+//   const sw = lonLatToMercator(data.bbox.west, data.bbox.south);
+//   const ne = lonLatToMercator(data.bbox.east, data.bbox.north);
+//   mercBBox = { minX: Math.min(sw.x, ne.x), maxX: Math.max(sw.x, ne.x), minY: Math.min(sw.y, ne.y), maxY: Math.max(sw.y, ne.y) };
+//   const midP = mercatorToPixel((mercBBox.minX+mercBBox.maxX)/2, (mercBBox.minY+mercBBox.maxY)/2);
+//   observer.x = midP.x; observer.y = midP.y;
+//   draw();
+//   // fetch initial buildings for this view
+//   fetchBuildingsForView({useViewMercBBox:true, expand:true});
+// }).catch(err => { console.warn(err); draw(); });
+//
+// (ou simplement cliquer sur "Récupérer bâtiments" après le chargement
+
+
+
+
+
+
+
+
+// Zoom with wheel (centered on cursor)
+canvas.addEventListener('wheel', (e)=>{
+  if(!mercBBox) return;
+  e.preventDefault();
+  const rect = canvas.getBoundingClientRect();
+  const px = e.clientX - rect.left;
+  const py = e.clientY - rect.top;
+  const centerM = pixelToMercator(px, py);
+  // smooth zoom factor: >1 zoom in, <1 zoom out
+  const zoomFactor = Math.exp(-e.deltaY * 0.006); // tweak sensitivity
+  // limit factor to avoid NaN
+  if(!isFinite(zoomFactor) || zoomFactor <= 0) return;
+
+  // compute new bounds by scaling distances to centerM
+  const minX = mercBBox.minX, maxX = mercBBox.maxX, minY = mercBBox.minY, maxY = mercBBox.maxY;
+  const newMinX = centerM.x - (centerM.x - minX) / zoomFactor;
+  const newMaxX = centerM.x + (maxX - centerM.x) / zoomFactor;
+  const newMinY = centerM.y - (centerM.y - minY) / zoomFactor;
+  const newMaxY = centerM.y + (maxY - centerM.y) / zoomFactor;
+
+  // clamp zoom range
+  const minWidth = 2.0; // meters (don't zoom in beyond this)
+  const newWidth = newMaxX - newMinX;
+  if(newWidth < minWidth) return;
+
+  mercBBox.minX = newMinX; mercBBox.maxX = newMaxX;
+  mercBBox.minY = newMinY; mercBBox.maxY = newMaxY;
+
+  // clear tile cache? not necessary — drawTiles will request required tiles
+  draw();
+}, { passive: false });
+
+// Pan with pointer drag
+let isDragging = false;
+let dragStart = null;
+let dragStartBBox = null;
+
+canvas.addEventListener('pointerdown', (e)=>{
+  if(!mercBBox) return;
+  // start pan on primary button
+  if(e.button !== 0) return;
+  const rect = canvas.getBoundingClientRect();
+  const px = e.clientX - rect.left;
+  const py = e.clientY - rect.top;
+  isDragging = true;
+  dragStart = {x: px, y: py};
+  dragStartBBox = {minX: mercBBox.minX, maxX: mercBBox.maxX, minY: mercBBox.minY, maxY: mercBBox.maxY};
+  canvas.setPointerCapture(e.pointerId);
+});
+canvas.addEventListener('pointerup', (e)=>{
+  if(isDragging){
+    isDragging = false;
+    try{ canvas.releasePointerCapture(e.pointerId); }catch(_){}
+  }
+});
+canvas.addEventListener('pointercancel', (e)=>{
+  if(isDragging) { isDragging = false; try{ canvas.releasePointerCapture(e.pointerId); }catch(_){} }
+});
+canvas.addEventListener('pointermove', (e)=>{
+  // if dragging (pan) override observer update above (pointermove handler already sets observer)
+  if(!isDragging || !dragStartBBox) return;
+  const rect = canvas.getBoundingClientRect();
+  const px = e.clientX - rect.left;
+  const py = e.clientY - rect.top;
+  const dx = px - dragStart.x;
+  const dy = py - dragStart.y;
+  const s = getPxPerMeter();
+  if(!isFinite(s) || s === 0) return;
+  // pan: for X: move bbox by -dx/s ; for Y: move bbox by +dy/s (see analyse)
+  mercBBox.minX = dragStartBBox.minX - dx / s;
+  mercBBox.maxX = dragStartBBox.maxX - dx / s;
+  mercBBox.minY = dragStartBBox.minY + dy / s;
+  mercBBox.maxY = dragStartBBox.maxY + dy / s;
+  draw();
 });
 
 /* --------------------
-   Prevent context menu on right click (optional)
-   -------------------- */
-canvas.addEventListener('contextmenu', (e)=>e.preventDefault());
+   Fetch Overpass -> convert -> project -> inject
+-------------------- */
+function computeMercBBoxFromGeojson(geojson){
+  let minX=Infinity, minY=Infinity, maxX=-Infinity, maxY=-Infinity;
+  for(const feat of geojson.features || []){
+    const geom = feat.geometry;
+    if(!geom) continue;
+    const polys = (geom.type === 'Polygon') ? [geom.coordinates] : (geom.type === 'MultiPolygon' ? geom.coordinates : []);
+    for(const poly of polys){
+      const ring = poly[0];
+      for(const coord of ring){
+        const lon = coord[0], lat = coord[1];
+        const m = lonLatToMercator(lon, lat);
+        if(m.x < minX) minX = m.x;
+        if(m.x > maxX) maxX = m.x;
+        if(m.y < minY) minY = m.y;
+        if(m.y > maxY) maxY = m.y;
+      }
+    }
+  }
+  if(minX === Infinity){
+    // fallback - use bbox from nominatim if present in outer scope BBOX
+    console.warn('computeMercBBoxFromGeojson: no features, keeping existing mercBBox if any.');
+    return;
+  }
+  mercBBox = { minX, maxX, minY, maxY };
+}
+
+async function fetchOverpass(){
+  statusEl.textContent = 'Récupération des bâtiments depuis Overpass…';
+  statusEl.className = 'status';
+  try{
+    // BBOX from earlier nominatim call (if present); fallback to a default
+    const data = await getCenteredBBox(adresse);
+    const BBOX = data.bbox;
+    const overpassQuery = `[out:json][timeout:60];
+    ( way["building"](${BBOX.south},${BBOX.west},${BBOX.north},${BBOX.east});
+      relation["building"](${BBOX.south},${BBOX.west},${BBOX.north},${BBOX.east});
+    );
+    out body;
+    >;
+    out skel qt;`;
+
+    const res = await fetchWithRetry('https://overpass-api.de/api/interpreter', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
+      body: 'data=' + encodeURIComponent(overpassQuery)
+    });
+    if(!res.ok) throw new Error(`Overpass HTTP ${res.status} ${res.statusText}`);
+    const osmJson = await res.json();
+    const geojson2 = osmtogeojson(osmJson);
+    if(!geojson2 || !geojson2.features || geojson2.features.length === 0){
+      statusEl.innerHTML = '<span class="danger">Aucune feature retournée par Overpass.</span>';
+      polygonsMerc = [];
+      draw();
+      return;
+    }
+
+    // compute mercator bbox & project
+    computeMercBBoxFromGeojson(geojson2);
+
+    // optional: filter tiny polygons
+    geojson2.features = geojson2.features.filter(f => {
+      try {
+        const coords = (f.geometry.type === 'Polygon') ? f.geometry.coordinates[0] : (f.geometry.type === 'MultiPolygon' ? f.geometry.coordinates[0][0] : []);
+        if(!coords || coords.length < 4) return false;
+        let minx=Infinity, miny=Infinity, maxx=-Infinity, maxy=-Infinity;
+        for(const c of coords){ minx=Math.min(minx,c[0]); maxx=Math.max(maxx,c[0]); miny=Math.min(miny,c[1]); maxy=Math.max(maxy,c[1]); }
+        const bboxArea = (maxx-minx)*(maxy-miny);
+        return bboxArea > 1e-9;
+      } catch(e){ return true; }
+    });
+
+    // merge touching buildings if mergeTouchingFeatures available
+    const mergedGeo = (typeof mergeTouchingFeatures === 'function') ? mergeTouchingFeatures(geojson2) : geojson2;
+
+    // recompute mercBBox on merged
+    computeMercBBoxFromGeojson(mergedGeo);
+
+    // convert to mercator polygons
+    polygonsMerc = geojsonToMercatorPolygons(mergedGeo);
+
+    if(polygonsMerc.length === 0){
+      statusEl.innerHTML = '<span class="danger">Conversion OK mais aucun polygon utilisable.</span>';
+    } else {
+      statusEl.innerHTML = '<span class="success">Chargé : ' + polygonsMerc.length + ' polygones (bâtiments).</span>';
+      // center observer in the middle of map area (pixel coords)
+      const midX = (mercBBox.minX + mercBBox.maxX)/2;
+      const midY = (mercBBox.minY + mercBBox.maxY)/2;
+      const midP = mercatorToPixel(midX, midY);
+      observer.x = midP.x; observer.y = midP.y;
+      draw();
+    }
+  } catch(err){
+    console.error(err);
+    statusEl.innerHTML = `<span class="danger">Erreur: ${escapeHtml(err.message || String(err))} — possible CORS ou indisponibilité Overpass.</span>`;
+  }
+}
+
+//fetchBtn.addEventListener('click', async ()=>{ await fetchOverpass(); });
+
+
+
+zoomFitBtn.addEventListener('click', ()=>{
+  if(!mercBBox) return;
+  const midX = (mercBBox.minX + mercBBox.maxX)/2;
+  const midY = (mercBBox.minY + mercBBox.maxY)/2;
+  const midP = mercatorToPixel(midX, midY);
+  observer.x = midP.x; observer.y = midP.y;
+  draw();
+});
+
+function escapeHtml(s){ return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+// initial: compute bbox around adresse and draw empty map
+getCenteredBBox(adresse).then(data=>{
+  const sw = lonLatToMercator(data.bbox.west, data.bbox.south);
+  const ne = lonLatToMercator(data.bbox.east, data.bbox.north);
+  mercBBox = { minX: Math.min(sw.x, ne.x), maxX: Math.max(sw.x, ne.x), minY: Math.min(sw.y, ne.y), maxY: Math.max(sw.y, ne.y) };
+  // set observer to center
+  const midP = mercatorToPixel((mercBBox.minX+mercBBox.maxX)/2, (mercBBox.minY+mercBBox.maxY)/2);
+  observer.x = midP.x; observer.y = midP.y;
+  draw();
+}).catch(err => { console.warn(err); draw(); });
+
+
+
+
+
+
+
+/* ---------- Initialisation après chargement complet de la page ---------- */
+window.addEventListener('load', async () => {
+  try {
+    statusEl.textContent = 'Initialisation de la carte…';
+    // attendre les polices si besoin (utile si tu utilises web fonts)
+    if (document.fonts && document.fonts.ready) await document.fonts.ready;
+
+    // s'assurer du bon sizing du canvas après rendu CSS
+    resizeCanvas();
+
+    // obtenir la bbox centrée sur l'adresse par défaut
+    const data = await getCenteredBBox(adresse);
+    const sw = lonLatToMercator(data.bbox.west, data.bbox.south);
+    const ne = lonLatToMercator(data.bbox.east, data.bbox.north);
+    mercBBox = {
+      minX: Math.min(sw.x, ne.x),
+      maxX: Math.max(sw.x, ne.x),
+      minY: Math.min(sw.y, ne.y),
+      maxY: Math.max(sw.y, ne.y)
+    };
+
+    // positionner l'observer au centre de la vue
+    const midX = (mercBBox.minX + mercBBox.maxX) / 2;
+    const midY = (mercBBox.minY + mercBBox.maxY) / 2;
+    const midP = mercatorToPixel(midX, midY);
+    observer.x = midP.x; observer.y = midP.y;
+
+    // premier rendu
+    draw();
+
+    // récupérer les bâtiments pour la vue initiale (débounced ou immédiat selon préférence)
+    // --> fetchBuildingsForView({useViewMercBBox:true, expand:true});
+    // ou si tu veux utilser le comportement actuel fetchOverpass (qui calcule aussi mercBBox) :
+    // await fetchOverpass();
+
+    // je recommande le fetch pour la vue actuelle (expansion incluse)
+    await fetchBuildingsForView({useViewMercBBox:true, expand:true});
+
+    statusEl.innerHTML = '<span class="success">Initialisation terminée.</span>';
+  } catch (err) {
+    console.warn('Initialisation carte échouée :', err);
+    statusEl.innerHTML = `<span class="danger">Initialisation échouée — ${escapeHtml(err.message || String(err))}</span>`;
+    // dessiner la carte vide si erreur
+    draw();
+  }
+});
+
 </script>
+
 </body>
 </html>
