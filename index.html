@@ -1,0 +1,433 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Simulation : Isovist (Ray casting 2D)</title>
+<style>
+  :root{
+    --bg:#0f1720;
+    --panel:#0b1220;
+    --accent:#22c1c3;
+    --muted:#94a3b8;
+  }
+  html,body{height:100%;margin:0;background:var(--bg);color:#e6eef6;font-family:Inter,ui-sans-serif,system-ui,Segoe UI,Roboto,"Helvetica Neue",Arial}
+  .container{display:flex;gap:12px;height:100%;padding:12px;box-sizing:border-box}
+  #canvasWrap{flex:1;border-radius:10px;background:linear-gradient(180deg,#0b1220,#071022);box-shadow:0 8px 30px rgba(2,6,23,0.6);position:relative;overflow:hidden}
+  canvas{width:100%;height:100%;display:block}
+  .panel{width:320px;background:var(--panel);border-radius:10px;padding:14px;box-sizing:border-box;display:flex;flex-direction:column;gap:12px}
+  h1{margin:0;font-size:16px}
+  .controls{display:flex;flex-direction:column;gap:8px}
+  label{font-size:13px;color:var(--muted)}
+  input[type="range"]{width:100%}
+  button{background:transparent;border:1px solid rgba(255,255,255,0.06);padding:8px;border-radius:8px;color:var(--accent);cursor:pointer}
+  .small{font-size:13px;color:var(--muted)}
+  .footer{margin-top:auto;font-size:12px;color:var(--muted)}
+  .hint{font-size:13px;color:var(--muted);margin-bottom:6px}
+</style>
+</head>
+<body>
+<div class="container">
+  <div id="canvasWrap">
+    <canvas id="c"></canvas>
+  </div>
+  <div class="panel">
+    <h1>Isovist — Ray casting 2D</h1>
+    <div class="hint">Clique sur la carte pour placer l'observateur.<br>Appuie sur "Générer" pour recréer les bâtiments.</div>
+
+    <div class="controls">
+      <label>Nombre de rayons : <span id="rayCountLabel">720</span></label>
+      <input id="rayCount" type="range" min="60" max="2048" step="10" value="720">
+
+      <label>Nombre de polygones : <span id="polyCountLabel">25</span></label>
+      <input id="polyCount" type="range" min="5" max="80" step="1" value="25">
+
+      <label>Taille max d'un polygone : <span id="polySizeLabel">120</span> px</label>
+      <input id="polySize" type="range" min="30" max="300" step="5" value="120">
+
+      <label>Rayon max (distance max de vue) : <span id="maxDistLabel">1200</span> px</label>
+      <input id="maxDist" type="range" min="200" max="3000" step="50" value="1200">
+
+      <div style="display:flex;gap:8px">
+        <button id="regen">Générer</button>
+        <button id="center">Centrer</button>
+        <button id="toggleRays">Basculer rayons</button>
+      </div>
+    </div>
+
+    <div class="footer">
+      <div class="small">Prototype — approche ray-casting 2D</div>
+      <div class="small" style="margin-top:6px">Astuce : réduire le nombre de rayons sur mobile pour de meilleures performances.</div>
+    </div>
+  </div>
+</div>
+
+<script>
+/*
+  Prototype isovist (ray casting 2D)
+  - click pour définir l'observateur
+  - rayons distribués uniformément
+  - intersection la plus proche avec les arêtes des polygones
+*/
+
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+
+let DPR = Math.min(window.devicePixelRatio || 1, 2);
+function resizeCanvas(){
+  const rect = canvas.getBoundingClientRect();
+  canvas.width = Math.round(rect.width * DPR);
+  canvas.height = Math.round(rect.height * DPR);
+}
+window.addEventListener('resize', () => { resizeCanvas(); draw(); });
+resizeCanvas();
+
+// UI refs
+const rayCountEl = document.getElementById('rayCount');
+const rayCountLabel = document.getElementById('rayCountLabel');
+const polyCountEl = document.getElementById('polyCount');
+const polyCountLabel = document.getElementById('polyCountLabel');
+const polySizeEl = document.getElementById('polySize');
+const polySizeLabel = document.getElementById('polySizeLabel');
+const maxDistEl = document.getElementById('maxDist');
+const maxDistLabel = document.getElementById('maxDistLabel');
+const regenBtn = document.getElementById('regen');
+const centerBtn = document.getElementById('center');
+const toggleRaysBtn = document.getElementById('toggleRays');
+
+rayCountLabel.textContent = rayCountEl.value;
+polyCountLabel.textContent = polyCountEl.value;
+polySizeLabel.textContent = polySizeEl.value;
+maxDistLabel.textContent = maxDistEl.value;
+
+rayCountEl.addEventListener('input', ()=>{ rayCountLabel.textContent = rayCountEl.value; draw(); });
+polyCountEl.addEventListener('input', ()=>{ polyCountLabel.textContent = polyCountEl.value; });
+polySizeEl.addEventListener('input', ()=>{ polySizeLabel.textContent = polySizeEl.value; });
+maxDistEl.addEventListener('input', ()=>{ maxDistLabel.textContent = maxDistEl.value; draw(); });
+regenBtn.addEventListener('click', ()=>{ generatePolygons(); draw(); });
+centerBtn.addEventListener('click', ()=>{ setObserver(canvas.width/2/DPR, canvas.height/2/DPR); draw(); });
+let showRays = true;
+toggleRaysBtn.addEventListener('click', ()=>{ showRays = !showRays; draw(); });
+
+/* --------------------
+   Génération de polygones aléatoires (bâtiments)
+   - mélange de rectangles et polygones convexes "étoilés"
+   -------------------- */
+let polygons = []; // each polygon = array of points [{x,y},...]
+function rand(min, max){ return Math.random()*(max-min)+min; }
+function randint(a,b){ return Math.floor(rand(a,b+1)); }
+
+function generateRandomConvexPolygon(cx, cy, maxRadius, vertexCount){
+  // sample angles evenly with jitter, radii random
+  const pts = [];
+  const base = 2*Math.PI / vertexCount;
+  for(let i=0;i<vertexCount;i++){
+    const ang = i*base + rand(-base*0.25, base*0.25);
+    const r = rand(maxRadius*0.4, maxRadius);
+    pts.push({x: cx + Math.cos(ang)*r, y: cy + Math.sin(ang)*r});
+  }
+  // compute centroid and sort by angle to ensure non-self-intersecting
+  const cxAvg = pts.reduce((s,p)=>s+p.x,0)/pts.length;
+  const cyAvg = pts.reduce((s,p)=>s+p.y,0)/pts.length;
+  pts.sort((a,b)=>Math.atan2(a.y-cyAvg,a.x-cxAvg) - Math.atan2(b.y-cyAvg,b.x-cxAvg));
+  return pts;
+}
+
+function generatePolygons(){
+  polygons = [];
+  const W = canvas.width / DPR, H = canvas.height / DPR;
+  const count = parseInt(polyCountEl.value,10);
+  const maxSize = parseInt(polySizeEl.value,10);
+
+  for(let i=0;i<count;i++){
+    // choose random center but avoid edges
+    const margin = 20;
+    const cx = rand(margin, W-margin);
+    const cy = rand(margin, H-margin);
+
+    // randomly choose rectangle or convex poly
+    if(Math.random() < 0.45){
+      // rectangle
+      const w = rand(maxSize*0.2, maxSize);
+      const h = rand(maxSize*0.2, maxSize);
+      const angle = rand(0, Math.PI*2);
+      const hw = w/2, hh = h/2;
+      const corners = [
+        {x:-hw, y:-hh},{x:hw,y:-hh},{x:hw,y:hh},{x:-hw,y:hh}
+      ].map(p=>{
+        return {
+          x: cx + (p.x*Math.cos(angle) - p.y*Math.sin(angle)),
+          y: cy + (p.x*Math.sin(angle) + p.y*Math.cos(angle))
+        };
+      });
+      polygons.push(corners);
+    } else {
+      // convex-ish polygon
+      const verts = randint(4,8);
+      polygons.push(generateRandomConvexPolygon(cx,cy, maxSize, verts));
+    }
+  }
+}
+generatePolygons();
+
+/* --------------------
+   Helpers géométriques
+   -------------------- */
+// list all segments from polygons
+function getSegmentsFromPolygons(polys){
+  const segs = [];
+  for(const poly of polys){
+    for(let i=0;i<poly.length;i++){
+      const a = poly[i];
+      const b = poly[(i+1)%poly.length];
+      segs.push({a:{x:a.x,y:a.y}, b:{x:b.x,y:b.y}});
+    }
+  }
+  return segs;
+}
+
+// intersection entre un rayon p + t*r (t>=0) et segment q + u*s (0<=u<=1)
+// retourne {x,y,t,u} ou null si pas d'intersection
+function intersectRaySegment(px,py, rx,ry, sx1,sy1, sx2,sy2){
+  // ray: P + t*R where R = (rx,ry)
+  // seg: S1 + u*(S2-S1)
+  const r = {x: rx, y: ry};
+  const s = {x: sx2 - sx1, y: sy2 - sy1};
+  const q = {x: sx1 - px, y: sy1 - py};
+
+  const rxs = r.x * s.y - r.y * s.x;
+  const qxr = q.x * r.y - q.y * r.x;
+
+  if (Math.abs(rxs) < 1e-9){
+    // parallel
+    return null;
+  }
+  const u = qxr / rxs;
+  const qxs = q.x * s.y - q.y * s.x;
+  const t = qxs / rxs;
+
+  // here we derived u and t with signs - double check orientation
+  // We need t >= 0 (on ray) and u in [0,1] (on segment)
+  if (t >= 0 && u >= 0 && u <= 1){
+    return { x: px + t * r.x, y: py + t * r.y, t: t, u: u };
+  }
+  return null;
+}
+
+// safer, alternate formula (avoid confusion) - use vector cross method
+function intersectRaySeg2(px,py, dirx,diry, x1,y1,x2,y2){
+  // solve P + t*D = A + u*(B-A)
+  const ax = x1, ay = y1;
+  const bx = x2, by = y2;
+  const dx = dirx, dy = diry;
+  const vx = bx - ax, vy = by - ay;
+  const denom = dx*vy - dy*vx;
+  if (Math.abs(denom) < 1e-9) return null;
+  const t = ( (ax - px)*vy - (ay - py)*vx ) / denom;
+  const u = ( (ax - px)*dy - (ay - py)*dx ) / denom;
+  if(t >= 0 && u >= 0 && u <= 1){
+    return { x: px + t*dx, y: py + t*dy, t: t, u: u };
+  }
+  return null;
+}
+
+/* --------------------
+   Ray casting : pour un origine, lancer N rayons et trouver intersections
+   -------------------- */
+let observer = {x: canvas.width/2/DPR, y: canvas.height/2/DPR};
+let segments = getSegmentsFromPolygons(polygons);
+
+function setObserver(x,y){
+  observer.x = x;
+  observer.y = y;
+}
+
+// écoute clic
+canvas.addEventListener('pointermove', (e)=>{
+  const rect = canvas.getBoundingClientRect();
+  const x = (e.clientX - rect.left) * (canvas.width / rect.width) / DPR;
+  const y = (e.clientY - rect.top) * (canvas.height / rect.height) / DPR;
+  setObserver(x,y);
+  draw();
+});
+
+function computeIsovist(origin, numRays, maxDist){
+  const pts = [];
+  const W = canvas.width/DPR, H = canvas.height/DPR;
+  const segs = getSegmentsFromPolygons(polygons);
+  for(let i=0;i<numRays;i++){
+    const ang = (i/numRays) * Math.PI * 2;
+    const dx = Math.cos(ang);
+    const dy = Math.sin(ang);
+
+    let nearest = null;
+    let nearestT = Infinity;
+
+    // cast ray - check every segment
+    for(const s of segs){
+      // intersection
+      const it = intersectRaySeg2(origin.x, origin.y, dx, dy, s.a.x, s.a.y, s.b.x, s.b.y);
+      if(it && it.t < nearestT){
+        nearestT = it.t;
+        nearest = {x: it.x, y: it.y};
+      }
+    }
+
+    if(nearest){
+      // clamp to maxDist if too far
+      const dist = Math.hypot(nearest.x - origin.x, nearest.y - origin.y);
+      if(dist > maxDist){
+        pts.push({x: origin.x + dx*maxDist, y: origin.y + dy*maxDist});
+      } else pts.push(nearest);
+    } else {
+      // no intersection -> ray reaches maxDist
+      pts.push({x: origin.x + dx*maxDist, y: origin.y + dy*maxDist});
+    }
+  }
+
+  // Optionnel : simplifier / réduire points en supprimant voisins colinéaires (non fait ici)
+  return pts;
+}
+
+/* --------------------
+   Dessin
+   -------------------- */
+function clear(){
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  // background
+  ctx.fillStyle = '#071022';
+  ctx.fillRect(0,0,canvas.width,canvas.height);
+}
+
+function draw(){
+  resizeCanvas();
+  clear();
+
+  ctx.save();
+  ctx.scale(DPR, DPR); // draw in CSS pixels coordinates
+
+  // draw grid
+  drawGrid();
+
+  // draw polygons (bâtiments)
+  ctx.lineWidth = 1;
+  ctx.strokeStyle = 'rgba(255,255,255,0.06)';
+  ctx.fillStyle = 'rgba(200,210,220,0.06)';
+  for(const poly of polygons){
+    ctx.beginPath();
+    for(let i=0;i<poly.length;i++){
+      const p = poly[i];
+      if(i===0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y);
+    }
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+  }
+
+  const numRays = parseInt(rayCountEl.value,10);
+  const maxDist = parseFloat(maxDistEl.value,10);
+
+  // compute isovist
+  const isoPts = computeIsovist(observer, numRays, maxDist);
+
+  // draw isovist fill
+  if(isoPts && isoPts.length>2){
+    ctx.beginPath();
+    ctx.moveTo(isoPts[0].x, isoPts[0].y);
+    for(let i=1;i<isoPts.length;i++) ctx.lineTo(isoPts[i].x, isoPts[i].y);
+    ctx.closePath();
+    // gradient fill
+    const g = ctx.createRadialGradient(observer.x, observer.y, 1, observer.x, observer.y, Math.min(maxDist, Math.hypot(canvas.width,canvas.height)));
+    g.addColorStop(0, 'rgba(34,193,195,0.18)');
+    g.addColorStop(1, 'rgba(34,193,195,0.02)');
+    ctx.fillStyle = g;
+    ctx.fill();
+    // outline
+    ctx.strokeStyle = 'rgba(34,193,195,0.9)';
+    ctx.lineWidth = 1.2;
+    ctx.stroke();
+  }
+
+  // optional draw rays
+  if(showRays){
+    ctx.lineWidth = 0.4;
+    ctx.strokeStyle = 'rgba(255,255,255,0.06)';
+    ctx.beginPath();
+    for(const p of isoPts){
+      ctx.moveTo(observer.x, observer.y);
+      ctx.lineTo(p.x, p.y);
+    }
+    ctx.stroke();
+  }
+
+  // draw observer
+  ctx.beginPath();
+  ctx.fillStyle = '#fff';
+  ctx.arc(observer.x, observer.y, 4, 0, Math.PI*2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.strokeStyle = '#0b1220';
+  ctx.lineWidth = 2;
+  ctx.arc(observer.x, observer.y, 6, 0, Math.PI*2);
+  ctx.stroke();
+
+  // draw facade outlines with light strokes for depth
+  ctx.lineWidth = 0.9;
+  ctx.strokeStyle = 'rgba(255,255,255,0.06)';
+  for(const poly of polygons){
+    ctx.beginPath();
+    for(let i=0;i<poly.length;i++){
+      const p = poly[i];
+      if(i===0) ctx.moveTo(p.x,p.y); else ctx.lineTo(p.x,p.y);
+    }
+    ctx.closePath();
+    ctx.stroke();
+  }
+
+  ctx.restore();
+}
+
+// small grid in background
+function drawGrid(){
+  const W = canvas.width/DPR, H = canvas.height/DPR;
+  const step = 50;
+  ctx.save();
+  ctx.strokeStyle = 'rgba(255,255,255,0.02)';
+  ctx.lineWidth = 1;
+  for(let x=0;x<=W;x+=step){
+    ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,H); ctx.stroke();
+  }
+  for(let y=0;y<=H;y+=step){
+    ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(W,y); ctx.stroke();
+  }
+  ctx.restore();
+}
+
+/* --------------------
+   Initial placement & animation
+   -------------------- */
+setObserver(canvas.width/2/DPR, canvas.height/2/DPR);
+draw();
+
+// simple animation loop not necessary but keeps DPR updated
+let raf;
+function loop(){
+  // nothing animated constantly; just keep running for responsiveness when resizing or interacting
+  raf = requestAnimationFrame(loop);
+}
+loop();
+
+/* --------------------
+   Keyboard shortcuts
+   -------------------- */
+window.addEventListener('keydown', (e)=>{
+  if(e.key === 'r') { generatePolygons(); draw(); }
+});
+
+/* --------------------
+   Prevent context menu on right click (optional)
+   -------------------- */
+canvas.addEventListener('contextmenu', (e)=>e.preventDefault());
+</script>
+</body>
+</html>
