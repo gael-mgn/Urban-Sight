@@ -289,9 +289,9 @@ maxDistEl.addEventListener('input', ()=>{ maxDistLabel.textContent = maxDistEl.v
 
 let showRays = false;
 
-let adresse = "Versailles"; // pour getCenteredBBox (tu peux modifier)
+let adresse = "Brest"; // pour getCenteredBBox (tu peux modifier)
 
-async function getCenteredBBox(address, halfHeight = 0.0048, halfWidth = 0.010) {
+async function getCenteredBBox(address, halfHeight = 0.0024, halfWidth = 0.0050) {
   const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(address)}&limit=1`;
   const response = await fetchWithRetry(url, { headers: { "User-Agent": "YourApp/1.0" } });
   const data = await response.json();
