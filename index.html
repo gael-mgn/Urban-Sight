@@ -10,6 +10,9 @@
 <script src="https://unpkg.com/topojson-client@3.1.0/dist/topojson-client.min.js"></script>
 <script src="merge.js"></script>
 
+<script type="module" src="https://gael-mgn.github.io/js/log.js"></script>
+
+
 
 
 <script>
@@ -46,18 +49,26 @@
 </script>
 
 <style>
+  /* cache le curseur quand il est au-dessus du canvas */
+#canvasWrap canvas {
+  cursor: none;
+}
   :root{
     --bg:#071022;
     --panel:#0b1220;
     --accent:#22c1c3;
     --muted:#94a3b8;
   }
+  a {
+    color: var(--accent);
+  }
   html,body{height:100%;margin:0;background:var(--bg);color:#e6eef6;font-family:Inter,system-ui,Segoe UI,Roboto,Arial}
   .container{display:flex;gap:12px;height:100%;padding:12px;box-sizing:border-box}
   #canvasWrap{flex:1;border-radius:10px;background:linear-gradient(180deg,#071022,#05111b);box-shadow:0 8px 30px rgba(2,6,23,0.6);position:relative;overflow:hidden}
   canvas{width:100%;height:100%;display:block;touch-action: none} /* prevent default gestures */
   .panel{width:360px;background:var(--panel);border-radius:10px;padding:14px;box-sizing:border-box;display:flex;flex-direction:column;gap:12px}
-  h1{margin:0;font-size:16px}
+  h1{margin:0;font-size:20px}
+  h2{font-size:16px}
   .controls{display:flex;flex-direction:column;gap:8px}
   label{font-size:13px;color:var(--muted)}
   input[type="range"]{width:100%}
@@ -207,17 +218,25 @@
 
       <div class="status" id="status">Aucune donnée chargée.</div>
 
-      <label>Nombre de rayons : <span id="rayCountLabel">720</span></label>
-      <input id="rayCount" type="range" min="20" max="500" step="10" value="100">
+      <label>Nombre de rayons : <span id="rayCountLabel"></span></label>
+      <input id="rayCount" type="range" min="20" max="500" step="10" value="150">
 
-      <label>Rayon max (distance max vue) : <span id="maxDistLabel">200</span> m</label>
+      <label>Rayon max (distance max vue) : <span id="maxDistLabel"></span> m</label>
       <input id="maxDist" type="range" min="20" max="200" step="10" value="120">
 
       <div style="display:flex;gap:8px;display: none;">
         <button id="zoomFit">Ajuster vue</button>
       </div>
 
-      <div class="small">La perméabilité visuelle désigne la capacité d'un espace à permettre à la vue de circuler librement, offrant ainsi une connexion visuelle entre différentes zones, qu'elles soient intérieures ou extérieures. Elle influence la perception de l'espace, l'intimité et la circulation des utilisateurs. Ainsi, vous trouverez sur ce site un outil permettant d'évaluer la perméabilité visuelle d'espaces dans le monde entier !</div>
+      <h2>À propos de la Perméabilité Visuelle</h2>
+
+      <div class="small">La perméabilité visuelle désigne la capacité d'un espace à permettre à la vue de circuler librement, offrant ainsi une connexion visuelle entre différentes zones. Elle influence la perception de l'espace, l'intimité et la circulation des utilisateurs.</div>
+
+
+      <h2>Étude de la perméabilité Visuelle</h2>
+
+      <div class="small">Je développe également un outil permettant de quantifier la perméabilité visuelle d’une zone géographique donnée, dans la perspective de mener une analyse à l’échelle de l’ensemble du territoire français. Si cet outil vous intéresse ou si vous avez besoin d’un dispositif de ce type, n’hésitez pas à me contacter à l’adresse suivante : <a href="mailto:contact@gael-maignan.fr">contact@gael-maignan.fr</a> ou sur <a href="https://www.linkedin.com/in/gael-maignan/" target="_blank">LinkedIn</a></div>
+
     </div>
 
     <div class="footer">
@@ -289,7 +308,22 @@ maxDistEl.addEventListener('input', ()=>{ maxDistLabel.textContent = maxDistEl.v
 
 let showRays = false;
 
-let adresse = "Brest"; // pour getCenteredBBox (tu peux modifier)
+const villes = [
+  "Brest",
+  "Paris",
+  "Marseille",
+  "Lyon",
+  "Lille",
+  "Toulouse",
+  "Nice",
+  "Bordeaux",
+  "Nantes",
+  "Strasbourg",
+  "Grenoble",
+];
+
+// Choisir une ville aléatoire
+let adresse = villes[Math.floor(Math.random() * villes.length)];
 
 async function getCenteredBBox(address, halfHeight = 0.0024, halfWidth = 0.0050) {
   const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(address)}&limit=1`;
