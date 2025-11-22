@@ -19,6 +19,19 @@
 
 
 <script>
+  // ----------------- LIMITES DE ZOOM (en mètres, WebMercator) -----------------
+const MIN_VIEW_WIDTH_METERS = 2.0;          // limite de zoom avant (ne pas zoomer plus près)
+const MAX_VIEW_WIDTH_METERS = 2_500;    // limite de dézoom (ex : ~5 000 km). Ajuste si nécessaire.
+// seuil relatif minimal de changement pour déclencher un redraw (ex: 0.1%)
+const ZOOM_REL_CHANGE_THRESHOLD = 0.01; // 0.1% : ajuste si tu veux être plus/moins permissif
+// délai d'inactivité après wheel avant d'actualiser les bâtiments (ms)
+const WHEEL_IDLE_DELAY_MS = 520; // ajuste (200-300ms couramment)
+
+
+
+// ----------------------------------------------------------------------------
+
+
   async function fetchWithRetry(url, options = {}, retries = 4, delay = 1000) {
     let attempts = 0;
 
@@ -225,7 +238,7 @@
       <input id="rayCount" type="range" min="20" max="500" step="10" value="150">
 
       <label>Rayon max (distance max vue) : <span id="maxDistLabel"></span> m</label>
-      <input id="maxDist" type="range" min="20" max="200" step="10" value="120">
+      <input id="maxDist" type="range" min="20" max="400" step="10" value="120">
 
       <div style="display:flex;gap:8px;display: none;">
         <button id="zoomFit">Ajuster vue</button>
@@ -260,6 +273,108 @@
 
 const canvas = document.getElementById('c');
 const ctx = canvas.getContext('2d');
+/* ======================
+   OPTIM: Offscreen + caches & index
+   INSÈRER ICI (après `const ctx = canvas.getContext('2d');`)
+   ====================== */
+const offscreenBuildings = document.createElement('canvas'); // utilisé pour dessiner bâtiments statiques
+const offscreenBuildingsCtx = offscreenBuildings.getContext('2d');
+
+let projectedPolygons = null; // pixel-projected polygons (mise à jour uniquement quand la vue change ou après fetch)
+let segmentsCache = null;      // tableau d'objets {a:{x,y}, b:{x,y}, minX,minY,maxX,maxY} précomputés
+let lastMercBBoxHash = null;   // pour détecter changement de vue
+
+// Animation / draw control
+let needRedrawDynamic = true; // indique qu'il faut redraw dynamique (isovist + curseur)
+let scheduledRAF = false;
+
+// helper hashing simple pour mercBBox (tolérance)
+function hashMercBBox(mb){
+  if(!mb) return null;
+  // arrondir à 1 pixel d'équivalence pour éviter redraws mineurs
+  const e = 1e-6;
+  return `${Math.round(mb.minX/e)}_${Math.round(mb.maxX/e)}_${Math.round(mb.minY/e)}_${Math.round(mb.maxY/e)}`;
+}
+
+// quick AABB test
+function aabbIntersects(ax1,ay1,ax2,ay2, bx1,by1,bx2,by2){
+  return !(bx1 > ax2 || bx2 < ax1 || by1 > ay2 || by2 < ay1);
+}
+/* ======================
+   Fonctions d'optimisation : projection, segments cache, offscreen render
+   INSÉRER ICI (après helpers mercator/pixel)
+   ====================== */
+
+function projectPolygonsToPixels(){
+  // projette polygonsMerc -> projectedPolygons (en pixels CSS)
+  projectedPolygons = polygonsMerc.map(ring => ring.map(m => mercatorToPixel(m.x, m.y)));
+  // éventuellement simplifier si beaucoup de points (optionnel)
+  // TODO: appliquer DP simplification si nécessaire (pixel tolérance)
+}
+
+function buildSegmentsCacheFromProjected(){
+  // construit segmentsCache = [{a:{x,y}, b:{x,y}, minX,minY,maxX,maxY}, ...]
+  const segs = [];
+  for(const poly of projectedPolygons){
+    for(let i=0;i<poly.length;i++){
+      const a = poly[i];
+      const b = poly[(i+1)%poly.length];
+      const minX = Math.min(a.x,b.x), maxX = Math.max(a.x,b.x);
+      const minY = Math.min(a.y,b.y), maxY = Math.max(a.y,b.y);
+      segs.push({a:{x:a.x,y:a.y}, b:{x:b.x,y:b.y}, minX, minY, maxX, maxY});
+    }
+  }
+  segmentsCache = segs;
+}
+
+function renderBuildingsToOffscreen(){
+  if(!projectedPolygons) return;
+  // dimensionner offscreen au CSS pixels (devicePixelRatio géré dans draw quand on blit)
+  const W = canvas.width / DPR, H = canvas.height / DPR;
+  offscreenBuildings.width = Math.round(canvas.width);   // device pixels
+  offscreenBuildings.height = Math.round(canvas.height); // device pixels
+  const osctx = offscreenBuildingsCtx;
+  osctx.clearRect(0,0,offscreenBuildings.width, offscreenBuildings.height);
+  // on dessine en user-space CSS => appliquer scale DPR
+  osctx.save();
+  osctx.scale(DPR, DPR);
+
+  // style identique à ton rendu principal
+  osctx.lineWidth = -2;
+  osctx.strokeStyle = 'rgba(44,54,64,0.4)';
+  osctx.fillStyle = 'rgba(16,28,38,1)';
+
+  for(const poly of projectedPolygons){
+    osctx.beginPath();
+    for(let i=0;i<poly.length;i++){
+      const p = poly[i];
+      if(i===0) osctx.moveTo(p.x,p.y); else osctx.lineTo(p.x,p.y);
+    }
+    osctx.closePath();
+    osctx.fill();
+    osctx.stroke();
+  }
+
+  // outlines si voulu (faible coût ici car offscreen)
+  if(showPolygonsOutline){
+    osctx.lineWidth = 0.9;
+    osctx.strokeStyle = 'rgba(255,255,255,0.06)';
+    for(const poly of projectedPolygons){
+      osctx.beginPath();
+      for(let i=0;i<poly.length;i++){
+        const p = poly[i];
+        if(i===0) osctx.moveTo(p.x,p.y); else osctx.lineTo(p.x,p.y);
+      }
+      osctx.closePath();
+      osctx.stroke();
+    }
+  }
+  osctx.restore();
+}
+
+/* simple coarse uniform grid would be next-step; for l'instant on utilise
+   AABB prefilter + segmentsCache pour éviter millions d'opérations inutiles */
+
 let DPR = Math.min(window.devicePixelRatio || 1, 2);
 function resizeCanvas(){
   const rect = canvas.getBoundingClientRect();
@@ -275,7 +390,6 @@ const rayCountEl = document.getElementById('rayCount');
 const rayCountLabel = document.getElementById('rayCountLabel');
 const maxDistEl = document.getElementById('maxDist');
 const maxDistLabel = document.getElementById('maxDistLabel');
-const zoomFitBtn = document.getElementById('zoomFit');
 
 
 
@@ -542,6 +656,81 @@ function intersectRaySeg2(px,py, dirx,diry, x1,y1,x2,y2){
   }
   return null;
 }
+// -------------------------
+// Helper : test point in polygon (ray-casting) + test any building
+// Insère ceci juste après `intersectRaySeg2(...)`
+// -------------------------
+function pointInPolygon(px, py, poly){
+  // poly : [{x,y}, ...] en pixels
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const xi = poly[i].x, yi = poly[i].y;
+    const xj = poly[j].x, yj = poly[j].y;
+    const intersect = ((yi > py) !== (yj > py)) &&
+                      (px < (xj - xi) * (py - yi) / (yj - yi + 0.0) + xi);
+    if (intersect) inside = !inside;
+  }
+  return inside;
+}
+
+function isPointInAnyBuilding(px, py){
+  if(!projectedPolygons || projectedPolygons.length === 0) return false;
+  // AABB prefilter pour chaque polygone (gain de perf si beaucoup de polygones)
+  for(const poly of projectedPolygons){
+    // calcule bbox du poly (rapide)
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    for(const p of poly){ if(p.x < minX) minX = p.x; if(p.x > maxX) maxX = p.x; if(p.y < minY) minY = p.y; if(p.y > maxY) maxY = p.y; }
+    if(px < minX || px > maxX || py < minY || py > maxY) continue; // hors bbox -> skip
+    if(pointInPolygon(px, py, poly)) return true;
+  }
+  return false;
+}
+
+/* ======================
+   computeIsovistFast : utilise segmentsCache & préfiltre AABB
+   INSÉRER ICI (après intersectRaySeg2)
+   ====================== */
+function computeIsovistFast(origin, numRays, maxDist){
+  if(!segmentsCache) return computeIsovist(origin, numRays, maxDist); // fallback
+
+  const pts = [];
+  // prepare bounding box of ray (toute la zone circulaire) to quickly filter segments
+  for(let i=0;i<numRays;i++){
+    const ang = (i/numRays) * Math.PI * 2;
+    const dx = Math.cos(ang);
+    const dy = Math.sin(ang);
+    const rayMaxX = origin.x + dx * maxDist;
+    const rayMinX = Math.min(origin.x, rayMaxX);
+    const rayMaxXX = Math.max(origin.x, rayMaxX);
+    const rayMaxY = origin.y + dy * maxDist;
+    const rayMinY = Math.min(origin.y, rayMaxY);
+    const rayMaxYY = Math.max(origin.y, rayMaxY);
+
+    let nearest = null;
+    let nearestT = Infinity;
+
+    // loop over segmentsCache but with AABB prefilter
+    for(const s of segmentsCache){
+      // quick bbox test (si bbox du segment n'intersecte pas bbox du rayon, skip)
+      if(!aabbIntersects(rayMinX, rayMinY, rayMaxXX, rayMaxYY, s.minX, s.minY, s.maxX, s.maxY)) continue;
+      const it = intersectRaySeg2(origin.x, origin.y, dx, dy, s.a.x, s.a.y, s.b.x, s.b.y);
+      if(it && it.t < nearestT){
+        nearestT = it.t;
+        nearest = {x: it.x, y: it.y};
+      }
+    }
+
+    if(nearest){
+      const dist = Math.hypot(nearest.x - origin.x, nearest.y - origin.y);
+      if(dist > maxDist) pts.push({x: origin.x + dx*maxDist, y: origin.y + dy*maxDist});
+      else pts.push(nearest);
+    } else {
+      pts.push({x: origin.x + dx*maxDist, y: origin.y + dy*maxDist});
+    }
+  }
+  return pts;
+}
+
 function computeIsovist(origin, numRays, maxDist){
   const pts = [];
   const segs = getSegmentsFromPolygons(polygons);
@@ -575,6 +764,82 @@ function computeIsovist(origin, numRays, maxDist){
 const tileSize = 256; // tile pixel size (CSS px)
 const initialResolution = 2 * Math.PI * R / tileSize; // meters per pixel at zoom 0
 const tileCache = {}; // url -> Image | 'loading' | 'error'
+let mustCaptureTilesOnly = false;
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+// snapshot des tuiles (offscreen canvas) utilisé pendant zoom/pan
+
+let tilesSnapshot = null;              // canvas (device pixels)
+let tilesSnapshotMercBBox = null;      // copie du mercBBox correspondant à ce snapshot
+
+// helpers paramétrés par bbox (utilisent la même logique que tes helpers existants)
+function mercatorToPixelGivenBBox(mx, my, bbox){
+  const W = canvas.width / DPR, H = canvas.height / DPR;
+  const pad = mapPadding;
+  const minX = bbox.minX, maxX = bbox.maxX, minY = bbox.minY, maxY = bbox.maxY;
+  const sx = (W - pad*2) / (maxX - minX);
+  const sy = (H - pad*2) / (maxY - minY);
+  const s = Math.min(sx, sy);
+  const widthMapped = (maxX - minX) * s;
+  const heightMapped = (maxY - minY) * s;
+  const offsetX = (W - widthMapped) / 2;
+  const offsetY = (H - heightMapped) / 2;
+  const px = offsetX + (mx - minX) * s;
+  const py = offsetY + (maxY - my) * s;
+  return {x: px, y: py};
+}
+function pixelToMercatorGivenBBox(px, py, bbox){
+  const W = canvas.width / DPR, H = canvas.height / DPR;
+  const pad = mapPadding;
+  const minX = bbox.minX, maxX = bbox.maxX, minY = bbox.minY, maxY = bbox.maxY;
+  const sx = (W - pad*2) / (maxX - minX);
+  const sy = (H - pad*2) / (maxY - minY);
+  const s = Math.min(sx, sy);
+  const widthMapped = (maxX - minX) * s;
+  const heightMapped = (maxY - minY) * s;
+  const offsetX = (W - widthMapped) / 2;
+  const offsetY = (H - heightMapped) / 2;
+  const mx = minX + (px - offsetX) / s;
+  const my = maxY - (py - offsetY) / s;
+  return {x: mx, y: my};
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+// ----------------- contrôle du chargement des tuiles -----------------
+// Tant que les bâtiments ne sont pas chargés (ou au moins qu'un essai de chargement est
+// effectué), on ne déclenche pas les requêtes de tuiles. Cela inverse la logique.
+let tilesEnabled = false;
+
 
 function lonToTileX(lon, z){
   return (lon + 180) / 360 * Math.pow(2, z);
@@ -603,7 +868,48 @@ function computeZoomFromScale(){
 }
 
 function drawTiles(){
+
   if(!mercBBox) return;
+    // Si les bâtiments n'ont pas encore été récupérés (flag false),
+
+
+
+    // Si tiles désactivées => si on a un snapshot de l'ancienne vue, on l'affiche transformé
+  if (!tilesEnabled) {
+    if (tilesSnapshot && tilesSnapshotMercBBox) {
+      try {
+        // on est dans draw() après avoir fait ctx.scale(DPR,DPR)
+        // calculer où les coins du snapshot (ancien) tombent dans la nouvelle vue
+        const Wcss = canvas.width / DPR, Hcss = canvas.height / DPR;
+
+        // coin haut-gauche et bas-droit en mercator selon l'ancienne bbox
+        const originM = pixelToMercatorGivenBBox(0, 0, tilesSnapshotMercBBox);
+        const cornerM = pixelToMercatorGivenBBox(Wcss, Hcss, tilesSnapshotMercBBox);
+
+        // position de ces coins dans la nouvelle vue (CSS px)
+        const originNew = mercatorToPixelGivenBBox(originM.x, originM.y, mercBBox);
+        const cornerNew = mercatorToPixelGivenBBox(cornerM.x, cornerM.y, mercBBox);
+
+        const destX = originNew.x, destY = originNew.y;
+        const destW = cornerNew.x - originNew.x;
+        const destH = cornerNew.y - originNew.y;
+
+        // dessiner le snapshot (src en device px, dest en user space CSS px)
+        ctx.drawImage(tilesSnapshot,
+                      0, 0, tilesSnapshot.width, tilesSnapshot.height,
+                      destX, destY, destW, destH);
+        return;
+      } catch (err) {
+        // en cas d'erreur on tombe back sur le comportement standard (aucun snapshot)
+        console.warn('Erreur draw snapshot:', err);
+      }
+    }
+    // si pas de snapshot, on tait (on laisse le clear() faire son fond uni)
+    return;
+  }
+
+
+
   const z = computeZoomFromScale();
 
   const sw = mercatorToLonLat(mercBBox.minX, mercBBox.minY);
@@ -676,8 +982,25 @@ function draw(){
   clear();
   if(!mercBBox) { ctx.save(); ctx.scale(DPR,DPR); ctx.restore(); return; }
 
-  // Recompute pixel polygons from polygonsMerc before drawing & collision
-  polygons = polygonsMerc.map(ring => ring.map(m => mercatorToPixel(m.x, m.y)));
+/* ======================
+   REMPLACER projection fréquente par projection conditionnelle
+   (remplace la ligne "polygons = polygonsMerc.map(...)" dans draw())
+   ====================== */
+if(!polygonsMerc || polygonsMerc.length === 0){
+  projectedPolygons = [];
+} else {
+  // si la bbox mercator (vue) n'a pas changé et qu'on a déjà projeté -> réutiliser
+  const h = hashMercBBox(mercBBox);
+  if(lastMercBBoxHash !== h || !projectedPolygons){
+    // projection lourde : faire une fonction séparée pour pouvoir l'appeler après fetch ou après zoom/pan
+    projectPolygonsToPixels();
+    lastMercBBoxHash = h;
+    // reconstruire segmentsCache à partir de projectedPolygons
+    buildSegmentsCacheFromProjected();
+    // (re-render buildings offscreen)
+    renderBuildingsToOffscreen();
+  }
+}
 
   ctx.save();
   ctx.scale(DPR, DPR);
@@ -685,36 +1008,89 @@ function draw(){
   // draw tiles
   drawTiles();
 
+// blit le canvas offscreen des buildings (si présent)
+if(offscreenBuildings && offscreenBuildings.width && offscreenBuildings.height){
+  // drawImage uses device pixels; on a dimensionné offscreen en device pixels
+  ctx.drawImage(offscreenBuildings, 0, 0, offscreenBuildings.width / DPR, offscreenBuildings.height / DPR);
+}
+
+
+  // Capture uniquement le fond de carte (tuiles)
+// après drawTiles() mais avant buildings/cursor/vision
+if (mustCaptureTilesOnly) {
+    try {
+        tilesSnapshot = document.createElement('canvas');
+        tilesSnapshot.width = canvas.width;
+        tilesSnapshot.height = canvas.height;
+        const sctx = tilesSnapshot.getContext('2d');
+        
+        // On copie le canvas AVANT les bâtiments/cursor => donc seulement les tuiles
+        sctx.drawImage(canvas, 0, 0);
+
+        // On mémorise la bbox correspondant à ce snapshot
+        tilesSnapshotMercBBox = {
+            minX: mercBBox.minX,
+            maxX: mercBBox.maxX,
+            minY: mercBBox.minY,
+            maxY: mercBBox.maxY
+        };
+    } catch (err) {
+        console.warn('Erreur capture tile-only snapshot:', err);
+        tilesSnapshot = null;
+        tilesSnapshotMercBBox = null;
+    }
+
+    mustCaptureTilesOnly = false; // capture effectuée
+}
+  
+
+
   // grid on top
   drawGrid();
 
-  
 
+
+// dynamic layer : isovist (calculé à partir des segmentsCache et observer)
 const numRays = parseInt(rayCountEl.value,10);
+const maxDistMeters = parseFloat(maxDistEl.value, 10) || 0;
+let pxPerMeter = getPxPerMeter();
+if(!isFinite(pxPerMeter) || pxPerMeter <= 0) pxPerMeter = 1;
+let maxDist = maxDistMeters * pxPerMeter;
+if(!isFinite(maxDist) || maxDist <= 0) maxDist = 100;
 
- const maxDistMeters = parseFloat(maxDistEl.value, 10) || 0;
-  let pxPerMeter = getPxPerMeter();
-  if(!isFinite(pxPerMeter) || pxPerMeter <= 0) pxPerMeter = 1;
-  let maxDist = maxDistMeters * pxPerMeter;
-  if(!isFinite(maxDist) || maxDist <= 0) maxDist = 100;
-
-  const isoPts = computeIsovist(observer, numRays, maxDist);
+// compute isovist from optimized computeIsovistFast
+const isoPts = computeIsovistFast(observer, numRays, maxDist);
 
 
-  if(isoPts && isoPts.length>2){
-    ctx.beginPath();
-    ctx.moveTo(isoPts[0].x, isoPts[0].y);
-    for(let i=1;i<isoPts.length;i++) ctx.lineTo(isoPts[i].x, isoPts[i].y);
-    ctx.closePath();
-    const g = ctx.createRadialGradient(observer.x, observer.y, 1, observer.x, observer.y, Math.min(maxDist, Math.hypot(canvas.width,canvas.height)));
+// draw observer (avec changement de style si le curseur est DANS un bâtiment)
+const cursorInBuilding = isPointInAnyBuilding(observer.x, observer.y);
+
+
+// draw isovist
+if(isoPts && isoPts.length>2){
+  ctx.beginPath();
+  ctx.moveTo(isoPts[0].x, isoPts[0].y);
+  for(let i=1;i<isoPts.length;i++) ctx.lineTo(isoPts[i].x, isoPts[i].y);
+  ctx.closePath();
+  const g = ctx.createRadialGradient(observer.x, observer.y, 1, observer.x, observer.y, Math.min(maxDist, Math.hypot(canvas.width,canvas.height)));
+    if(!cursorInBuilding){
     g.addColorStop(0, 'rgba(34,193,195,0.38)');
-    g.addColorStop(1, 'rgba(34,193,195,0.02)');
-    ctx.fillStyle = g;
-    ctx.fill();
-    ctx.strokeStyle = 'rgba(34,193,195,0.9)';
-    ctx.lineWidth = 1.2;
-    ctx.stroke();
+  g.addColorStop(1, 'rgba(34,193,195,0.02)');
+  }else {
+g.addColorStop(0, 'rgba(255,0,0,0)');
+  g.addColorStop(1, 'rgba(255,0,0,0)');
   }
+  ctx.fillStyle = g;
+  ctx.fill();
+  if(!cursorInBuilding){
+  ctx.strokeStyle = 'rgba(34,193,195,0.9)';
+}else {
+  ctx.strokeStyle = 'rgba(255,0,0,0.6)';
+}
+  ctx.lineWidth = 1.2;
+  ctx.stroke();
+}
+
 
   if(showRays){
     ctx.lineWidth = 0.35;
@@ -724,63 +1100,57 @@ const numRays = parseInt(rayCountEl.value,10);
     ctx.stroke();
   }
 
-  // draw polygons (bâtiments)
-  ctx.lineWidth = -2;
-  ctx.strokeStyle = 'rgba(44,54,64,0.4)';
-  ctx.fillStyle = 'rgba(16,28,38,1)';
-  for(const poly of polygons){
-    ctx.beginPath();
-    for(let i=0;i<poly.length;i++){
-      const p = poly[i];
-      if(i===0) ctx.moveTo(p.x,p.y); else ctx.lineTo(p.x,p.y);
-    }
-    ctx.closePath();
-    ctx.fill();
-    ctx.stroke();
-  }
 
-  // draw observer
-  ctx.beginPath();
-  ctx.fillStyle = '#fff';
-  ctx.arc(observer.x, observer.y, 4, 0, Math.PI*2);
-  ctx.fill();
-  ctx.beginPath();
-  ctx.strokeStyle = '#0b1220';
-  ctx.lineWidth = 2;
-  ctx.arc(observer.x, observer.y, 6, 0, Math.PI*2);
-  ctx.stroke();
 
-  // outlines
-  if(showPolygonsOutline){
-    ctx.lineWidth = 0.9;
-    ctx.strokeStyle = 'rgba(255,255,255,0.06)';
-    for(const poly of polygons){
-      ctx.beginPath();
-      for(let i=0;i<poly.length;i++){
-        const p = poly[i];
-        if(i===0) ctx.moveTo(p.x,p.y); else ctx.lineTo(p.x,p.y);
-      }
-      ctx.closePath();
-      ctx.stroke();
-    }
-  }
 
-  ctx.restore();
+// draw observer
+ctx.beginPath();
+ctx.fillStyle = '#fff';
+ctx.arc(observer.x, observer.y, 4, 0, Math.PI*2);
+ctx.fill();
+ctx.beginPath();
+ctx.strokeStyle = '#0b1220';
+ctx.lineWidth = 2;
+ctx.arc(observer.x, observer.y, 6, 0, Math.PI*2);
+ctx.stroke();
+
+
+
+
+ctx.restore();
+
 }
 
 /* --------------------
    Mouse handling: isovist suit la souris
    + pan & zoom
 -------------------- */
+/* ======================
+   Remplacer pointermove -> scheduler rAF (pour éviter redraws sync excessifs)
+   ====================== */
 canvas.addEventListener('pointermove', (e)=>{
-  // observer follows mouse
   const rect = canvas.getBoundingClientRect();
   const x = (e.clientX - rect.left);
   const y = (e.clientY - rect.top);
   observer.x = x;
   observer.y = y;
-  draw();
+
+  // ne pas appeler draw() directement : scheduler raf pour la couche dynamique
+  needRedrawDynamic = true;
+  if(!scheduledRAF){
+    scheduledRAF = true;
+    requestAnimationFrame(()=>{ scheduledRAF = false; doDynamicRedraw(); });
+  }
 });
+
+// fonction de redraw dynamique (isovist + curseur)
+function doDynamicRedraw(){
+  // draw only dynamic parts: uses current offscreenBuildings already blitted in drawBase()
+  // we call full draw but it will be cheap because buildings are offscreen
+  draw(); // draw() est désormais optimisé (blit offscreen + dynamic)
+  needRedrawDynamic = false;
+}
+
 canvas.addEventListener('contextmenu', (e)=>e.preventDefault());
 
 
@@ -858,7 +1228,6 @@ async function fetchBuildingsForView({useViewMercBBox=true, expand=true} = {}){
     statusEl.textContent = 'Impossible : mercBBox non initialisée.';
     return;
   }
-
    // show loader when we start fetching buildings
   showLoader('Récupération des bâtiments pour la vue…');
 
@@ -919,11 +1288,13 @@ async function fetchBuildingsForView({useViewMercBBox=true, expand=true} = {}){
     // merge touching buildings if mergeTouchingFeatures available
     const mergedGeo = (typeof mergeTouchingFeatures === 'function') ? mergeTouchingFeatures(geojson2) : geojson2;
 
-    // convert to mercator polygons (NE PAS remplacer mercBBox global)
-    polygonsMerc = geojsonToMercatorPolygons(mergedGeo);
+polygonsMerc = geojsonToMercatorPolygons(mergedGeo);
+// PROJECTION + CACHE + OFFSCREEN
+projectPolygonsToPixels();
+buildSegmentsCacheFromProjected();
+renderBuildingsToOffscreen();
+needRedrawDynamic = true;
 
-    // compute stats-only bbox (non assignée)
-    const geoMercBBox = getMercBBoxFromGeojson(mergedGeo);
 
     if(polygonsMerc.length === 0){
       statusEl.innerHTML = '<span class="danger">Conversion OK mais aucun polygon utilisable.</span>';
@@ -949,6 +1320,17 @@ async function fetchBuildingsForView({useViewMercBBox=true, expand=true} = {}){
   } finally {
     fetchAbortController = null;
     hideLoader();
+
+    // Activer les tuiles après la tentative de chargement des bâtiments
+    // (même en cas d'erreur on autorise ensuite le chargement des tuiles).
+    if (!tilesEnabled) {
+      tilesEnabled = true;
+      // on n'a plus besoin du snapshot (les tuiles vont remplacer l'ancien fond)
+      tilesSnapshot = null;
+      tilesSnapshotMercBBox = null;
+      // redraw pour déclencher drawTiles() qui lancera alors les chargements d'images
+      draw();
+    }
   }
 }
 
@@ -977,34 +1359,79 @@ function fetchBuildingsImmediately(){
 //
 // Pour être sûr, on actualise le handler wheel ci-dessous (remplace l'ancien) :
 
-canvas.addEventListener('wheel', (e)=>{
-  if(!mercBBox) return;
+// Zoom with wheel (centered on cursor) — remplace les autres handlers 'wheel'
+// Zoom with wheel (centered on cursor) — remplace tout autre handler 'wheel'
+// Zoom with wheel (centered on cursor) — handler robuste contre le "bounce"
+// Wheel handler — applique zoom visuel pendant le scroll, fetch only after wheel idle
+// --- Remplacer l'ancien wheel handler par celui-ci ---
+let _wheelIdleTimer = null;
+canvas.addEventListener('wheel', (e) => {
+  if (!mercBBox) return;
   e.preventDefault();
+
   const rect = canvas.getBoundingClientRect();
   const px = e.clientX - rect.left;
   const py = e.clientY - rect.top;
+
+  // point mercator sous le curseur
   const centerM = pixelToMercator(px, py);
-  const zoomFactor = Math.exp(-e.deltaY * 0.002);
-  if(!isFinite(zoomFactor) || zoomFactor <= 0) return;
+
+  // facteur de zoom (sensibilité)
+  const zoomFactor = Math.exp(-e.deltaY * 0.006);
+  if (!isFinite(zoomFactor) || zoomFactor <= 0) return;
 
   const minX = mercBBox.minX, maxX = mercBBox.maxX, minY = mercBBox.minY, maxY = mercBBox.maxY;
+  const oldWidth = maxX - minX;
+
+  // calcul des nouvelles bornes en appliquant zoom autour de centerM
   const newMinX = centerM.x - (centerM.x - minX) / zoomFactor;
   const newMaxX = centerM.x + (maxX - centerM.x) / zoomFactor;
   const newMinY = centerM.y - (centerM.y - minY) / zoomFactor;
   const newMaxY = centerM.y + (maxY - centerM.y) / zoomFactor;
 
-  const minWidth = 2.0;
   const newWidth = newMaxX - newMinX;
-  if(newWidth < minWidth) return;
 
-  mercBBox.minX = newMinX; mercBBox.maxX = newMaxX;
-  mercBBox.minY = newMinY; mercBBox.maxY = newMaxY;
+  // 1) si changement relatif trop petit -> probable bounce / micro-mouvement -> ignorer
+  const relChange = Math.abs(newWidth - oldWidth) / (oldWidth || 1);
+  if (relChange < ZOOM_REL_CHANGE_THRESHOLD) {
+    return; // pas d'actualisation visuelle ni fetch
+  }
 
+  // 2) limites strictes : si on sortirait des bornes -> ignorer (pas de redraw)
+  if (newWidth < MIN_VIEW_WIDTH_METERS) return; // limite zoom avant atteinte
+  if (newWidth > MAX_VIEW_WIDTH_METERS) return; // limite dézoom atteinte
+
+  // --- IMPORTANT: capture the tiles **before** disabling them and before changing mercBBox ---
+  // Indiquer qu'on veut capturer uniquement le fond lors du prochain draw()
+  mustCaptureTilesOnly = true;
+
+  // effectuer un draw synchrone *tant que tilesEnabled === true* pour capturer le fond actuel
   draw();
 
-  // schedule fetch after wheel activity stops
-  scheduleFetchBuildingsDebounced();
+  // maintenant que snapshot a été créé par draw(), on peut désactiver les tuiles et appliquer la nouvelle bbox
+  tilesEnabled = false;
+
+  // applique les nouvelles bornes (changement significatif et dans les limites)
+  mercBBox.minX = newMinX;
+  mercBBox.maxX = newMaxX;
+  mercBBox.minY = newMinY;
+  mercBBox.maxY = newMaxY;
+
+  // redraw immédiat pour retour visuel (affiche le snapshot transformé)
+  draw();
+
+  // Reset le timer d'idle : quand l'utilisateur arrête de scroller pendant WHEEL_IDLE_DELAY_MS,
+  // on déclenche un seul fetchBuildingsImmediately().
+  if (_wheelIdleTimer) clearTimeout(_wheelIdleTimer);
+  _wheelIdleTimer = setTimeout(() => {
+    _wheelIdleTimer = null;
+    // fetch once after stop
+    try { fetchBuildingsImmediately(); } catch (err) { console.warn(err); }
+  }, WHEEL_IDLE_DELAY_MS);
 }, { passive: false });
+
+
+
 
 // Pan: dans pointerup (fin du drag) on déclenche une fetch immédiate
 // Ton handler pointerup existant doit appeler fetchBuildingsImmediately() si un drag a eu lieu.
@@ -1013,6 +1440,8 @@ canvas.addEventListener('wheel', (e)=>{
 canvas.addEventListener('pointerup', (e)=>{
   if(isDragging){
     isDragging = false;
+      // capture snapshot au début du drag/pan
+
     try{ canvas.releasePointerCapture(e.pointerId); }catch(_){}
     // fetch buildings now that pan finished
     fetchBuildingsImmediately();
@@ -1042,11 +1471,6 @@ function zoomFit(){
   scheduleFetchBuildingsDebounced(200);
 }
 
-// Optionnel : recharger après zoomFit (si tu veux)
-zoomFitBtn.addEventListener('click', ()=>{
-  zoomFit();
-});
-
 /* --- initial : après calcul initial de mercBBox on lance un fetch pour remplir la vue --- */
 // Remplace le then() existant sur getCenteredBBox(...) en bas de ton script par ceci :
 //
@@ -1065,43 +1489,6 @@ zoomFitBtn.addEventListener('click', ()=>{
 
 
 
-
-
-
-
-
-// Zoom with wheel (centered on cursor)
-canvas.addEventListener('wheel', (e)=>{
-  if(!mercBBox) return;
-  e.preventDefault();
-  const rect = canvas.getBoundingClientRect();
-  const px = e.clientX - rect.left;
-  const py = e.clientY - rect.top;
-  const centerM = pixelToMercator(px, py);
-  // smooth zoom factor: >1 zoom in, <1 zoom out
-  const zoomFactor = Math.exp(-e.deltaY * 0.006); // tweak sensitivity
-  // limit factor to avoid NaN
-  if(!isFinite(zoomFactor) || zoomFactor <= 0) return;
-
-  // compute new bounds by scaling distances to centerM
-  const minX = mercBBox.minX, maxX = mercBBox.maxX, minY = mercBBox.minY, maxY = mercBBox.maxY;
-  const newMinX = centerM.x - (centerM.x - minX) / zoomFactor;
-  const newMaxX = centerM.x + (maxX - centerM.x) / zoomFactor;
-  const newMinY = centerM.y - (centerM.y - minY) / zoomFactor;
-  const newMaxY = centerM.y + (maxY - centerM.y) / zoomFactor;
-
-  // clamp zoom range
-  const minWidth = 2.0; // meters (don't zoom in beyond this)
-  const newWidth = newMaxX - newMinX;
-  if(newWidth < minWidth) return;
-
-  mercBBox.minX = newMinX; mercBBox.maxX = newMaxX;
-  mercBBox.minY = newMinY; mercBBox.maxY = newMaxY;
-
-  // clear tile cache? not necessary — drawTiles will request required tiles
-  draw();
-}, { passive: false });
-
 // Pan with pointer drag
 let isDragging = false;
 let dragStart = null;
@@ -1118,6 +1505,12 @@ canvas.addEventListener('pointerdown', (e)=>{
   dragStart = {x: px, y: py};
   dragStartBBox = {minX: mercBBox.minX, maxX: mercBBox.maxX, minY: mercBBox.minY, maxY: mercBBox.maxY};
   canvas.setPointerCapture(e.pointerId);
+
+  // capture tile-only snapshot before user starts panning
+mustCaptureTilesOnly = true;
+draw();           // draw synchronously while tilesEnabled is still true
+tilesEnabled = false; // puis désactiver le chargement de nouvelles tuiles pendant le drag
+// on garde dragStartBBox etc. comme tu as déjà
 });
 canvas.addEventListener('pointerup', (e)=>{
   if(isDragging){
@@ -1143,119 +1536,6 @@ canvas.addEventListener('pointermove', (e)=>{
   mercBBox.maxX = dragStartBBox.maxX - dx / s;
   mercBBox.minY = dragStartBBox.minY + dy / s;
   mercBBox.maxY = dragStartBBox.maxY + dy / s;
-  draw();
-});
-
-/* --------------------
-   Fetch Overpass -> convert -> project -> inject
--------------------- */
-function computeMercBBoxFromGeojson(geojson){
-  let minX=Infinity, minY=Infinity, maxX=-Infinity, maxY=-Infinity;
-  for(const feat of geojson.features || []){
-    const geom = feat.geometry;
-    if(!geom) continue;
-    const polys = (geom.type === 'Polygon') ? [geom.coordinates] : (geom.type === 'MultiPolygon' ? geom.coordinates : []);
-    for(const poly of polys){
-      const ring = poly[0];
-      for(const coord of ring){
-        const lon = coord[0], lat = coord[1];
-        const m = lonLatToMercator(lon, lat);
-        if(m.x < minX) minX = m.x;
-        if(m.x > maxX) maxX = m.x;
-        if(m.y < minY) minY = m.y;
-        if(m.y > maxY) maxY = m.y;
-      }
-    }
-  }
-  if(minX === Infinity){
-    // fallback - use bbox from nominatim if present in outer scope BBOX
-    console.warn('computeMercBBoxFromGeojson: no features, keeping existing mercBBox if any.');
-    return;
-  }
-  mercBBox = { minX, maxX, minY, maxY };
-}
-
-async function fetchOverpass(){
-  statusEl.textContent = 'Récupération des bâtiments depuis Overpass…';
-  statusEl.className = 'status';
-  try{
-    // BBOX from earlier nominatim call (if present); fallback to a default
-    const data = await getCenteredBBox(adresse);
-    const BBOX = data.bbox;
-    const overpassQuery = `[out:json][timeout:60];
-    ( way["building"](${BBOX.south},${BBOX.west},${BBOX.north},${BBOX.east});
-      relation["building"](${BBOX.south},${BBOX.west},${BBOX.north},${BBOX.east});
-    );
-    out body;
-    >;
-    out skel qt;`;
-
-    const res = await fetchWithRetry('https://overpass-api.de/api/interpreter', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
-      body: 'data=' + encodeURIComponent(overpassQuery)
-    });
-    if(!res.ok) throw new Error(`Overpass HTTP ${res.status} ${res.statusText}`);
-    const osmJson = await res.json();
-    const geojson2 = osmtogeojson(osmJson);
-    if(!geojson2 || !geojson2.features || geojson2.features.length === 0){
-      statusEl.innerHTML = '<span class="danger">Aucune feature retournée par Overpass.</span>';
-      polygonsMerc = [];
-      draw();
-      return;
-    }
-
-    // compute mercator bbox & project
-    computeMercBBoxFromGeojson(geojson2);
-
-    // optional: filter tiny polygons
-    geojson2.features = geojson2.features.filter(f => {
-      try {
-        const coords = (f.geometry.type === 'Polygon') ? f.geometry.coordinates[0] : (f.geometry.type === 'MultiPolygon' ? f.geometry.coordinates[0][0] : []);
-        if(!coords || coords.length < 4) return false;
-        let minx=Infinity, miny=Infinity, maxx=-Infinity, maxy=-Infinity;
-        for(const c of coords){ minx=Math.min(minx,c[0]); maxx=Math.max(maxx,c[0]); miny=Math.min(miny,c[1]); maxy=Math.max(maxy,c[1]); }
-        const bboxArea = (maxx-minx)*(maxy-miny);
-        return bboxArea > 1e-9;
-      } catch(e){ return true; }
-    });
-
-    // merge touching buildings if mergeTouchingFeatures available
-    const mergedGeo = (typeof mergeTouchingFeatures === 'function') ? mergeTouchingFeatures(geojson2) : geojson2;
-
-    // recompute mercBBox on merged
-    computeMercBBoxFromGeojson(mergedGeo);
-
-    // convert to mercator polygons
-    polygonsMerc = geojsonToMercatorPolygons(mergedGeo);
-
-    if(polygonsMerc.length === 0){
-      statusEl.innerHTML = '<span class="danger">Conversion OK mais aucun polygon utilisable.</span>';
-    } else {
-      statusEl.innerHTML = '<span class="success">Chargé : ' + polygonsMerc.length + ' polygones (bâtiments).</span>';
-      // center observer in the middle of map area (pixel coords)
-      const midX = (mercBBox.minX + mercBBox.maxX)/2;
-      const midY = (mercBBox.minY + mercBBox.maxY)/2;
-      const midP = mercatorToPixel(midX, midY);
-      observer.x = midP.x; observer.y = midP.y;
-      draw();
-    }
-  } catch(err){
-    console.error(err);
-    statusEl.innerHTML = `<span class="danger">Erreur: ${escapeHtml(err.message || String(err))} — possible CORS ou indisponibilité Overpass.</span>`;
-  }
-}
-
-//fetchBtn.addEventListener('click', async ()=>{ await fetchOverpass(); });
-
-
-
-zoomFitBtn.addEventListener('click', ()=>{
-  if(!mercBBox) return;
-  const midX = (mercBBox.minX + mercBBox.maxX)/2;
-  const midY = (mercBBox.minY + mercBBox.maxY)/2;
-  const midP = mercatorToPixel(midX, midY);
-  observer.x = midP.x; observer.y = midP.y;
   draw();
 });
 
@@ -1310,8 +1590,7 @@ window.addEventListener('load', async () => {
 
     // récupérer les bâtiments pour la vue initiale (débounced ou immédiat selon préférence)
     // --> fetchBuildingsForView({useViewMercBBox:true, expand:true});
-    // ou si tu veux utilser le comportement actuel fetchOverpass (qui calcule aussi mercBBox) :
-    // await fetchOverpass();
+
 
     // je recommande le fetch pour la vue actuelle (expansion incluse)
     await fetchBuildingsForView({useViewMercBBox:true, expand:true});
