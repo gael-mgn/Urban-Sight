@@ -257,6 +257,13 @@ const WHEEL_IDLE_DELAY_MS = 520; // ajuste (200-300ms couramment)
         <button id="zoomFit">Ajuster vue</button>
       </div>
 
+      <!-- ====== Toggle des arbres (INSERER DANS .controls) ====== -->
+<label style="display:flex;align-items:center;gap:8px;">
+  <input id="toggleTrees" type="checkbox" checked />
+  <span class="small">Afficher les arbres</span>
+</label>
+
+
       <h2>À propos de la Perméabilité Visuelle</h2>
 
       <div class="small">La perméabilité visuelle désigne la capacité d'un espace à permettre à la vue de circuler librement, offrant ainsi une connexion visuelle entre différentes zones. Elle influence la perception de l'espace, l'intimité et la circulation des utilisateurs.</div>
@@ -286,12 +293,103 @@ const WHEEL_IDLE_DELAY_MS = 520; // ajuste (200-300ms couramment)
 
 const canvas = document.getElementById('c');
 const ctx = canvas.getContext('2d');
+
+
+
+
+
+
+
+
+
+/* ======================
+   Arbres
+   ====================== */
+
+// ===== Arbres : données, options et constantes =====
+let showTrees = true;                 // contrôle d'affichage (lié à la checkbox)
+let treesGeo = [];                    // features nodes (raw) récupérées depuis Overpass
+let treesMerc = [];                   // arbres convertis en cercles (coord mercator)
+const DEFAULT_TREE_CIRCUMFERENCE_M = 1.0; // valeur de référence si pas d'infos (en mètres)
+const TREE_CANOPY_MULTIPLIER = 3.5;   // transforme rayon de tronc -> rayon de houppier approximatif
+const TREE_POLY_SEGMENTS = 18;        // nombre de segments pour approx cercle (collision)
+
+/**
+ * Convertit un noeud (lon,lat) + radiusMeters -> polygon ring en coordonnées Mercator (mètres)
+ * renvoie un tableau [{x,y},...]
+ */
+function createCirclePolygonMerc(lon, lat, radiusMeters, segments = TREE_POLY_SEGMENTS){
+  const center = lonLatToMercator(lon, lat);
+  const ring = [];
+  for(let i=0;i<segments;i++){
+    const ang = (i/segments) * Math.PI * 2;
+    // approx: 1 meter in mercator is not isotropic but pour petits rayon c'est OK
+    const dx = Math.cos(ang) * radiusMeters;
+    const dy = Math.sin(ang) * radiusMeters;
+    ring.push({ x: center.x + dx, y: center.y + dy });
+  }
+  return ring;
+}
+
+/**
+ * Déduit une "circonférence" en mètres à partir des tags OSM courants.
+ * Accepté: properties.circumference, dbh, diameter, circumference:cm...
+ * Retourne circumference en mètres.
+ */
+function parseCircumferenceMeters(props){
+  if(!props) return DEFAULT_TREE_CIRCUMFERENCE_M;
+  const pick = (k) => (props[k] !== undefined ? String(props[k]).trim() : null);
+  let v;
+  v = pick('circumference') || pick('circumference:meters') || pick('circumference:m') || pick('circumference:cm');
+  if(v){
+    let num = parseFloat(v.replace(',', '.'));
+    if(isNaN(num) === false){
+      // si valeur > 10 -> probablement en cm -> convertir en m
+      if(num > 10) num = num / 100;
+      return Math.max(0.01, num);
+    }
+  }
+  // dbh (diameter at breast height) souvent en cm
+  v = pick('dbh') || pick('diameter') || pick('diameter:cm');
+  if(v){
+    let num = parseFloat(v.replace(',', '.'));
+    if(!isNaN(num)){
+      // si dbh > 10 -> en cm -> convertir
+      if(num > 10) num = num / 100;
+      const circumference = Math.PI * num; // C = πD
+      return Math.max(0.01, circumference);
+    }
+  }
+  // si rien -> valeur par défaut
+  return DEFAULT_TREE_CIRCUMFERENCE_M;
+}
+/* ======================
+Fin arbres
+   ====================== */
+
+
+
+
+
+
+
+
 /* ======================
    OPTIM: Offscreen + caches & index
    INSÈRER ICI (après `const ctx = canvas.getContext('2d');`)
    ====================== */
 const offscreenBuildings = document.createElement('canvas'); // utilisé pour dessiner bâtiments statiques
 const offscreenBuildingsCtx = offscreenBuildings.getContext('2d');
+
+// -----------------------------
+// Séparation Buildings <-> Trees (stockage Mercator & projection)
+// -----------------------------
+let polygonsMercBuildings = []; // polygones Mercator (bâtiments / structures)
+let polygonsMercTrees = [];     // polygones Mercator (arbres uniquement)
+let projectedBuildings = null;  // projection pixels des bâtiments
+let projectedTrees = null;      // projection pixels des arbres
+// Note: projectedPolygons sera construit à partir de ces deux tableaux
+
 
 let projectedPolygons = null; // pixel-projected polygons (mise à jour uniquement quand la vue change ou après fetch)
 let segmentsCache = null;      // tableau d'objets {a:{x,y}, b:{x,y}, minX,minY,maxX,maxY} précomputés
@@ -319,11 +417,18 @@ function aabbIntersects(ax1,ay1,ax2,ay2, bx1,by1,bx2,by2){
    ====================== */
 
 function projectPolygonsToPixels(){
-  // projette polygonsMerc -> projectedPolygons (en pixels CSS)
-  projectedPolygons = polygonsMerc.map(ring => ring.map(m => mercatorToPixel(m.x, m.y)));
-  // éventuellement simplifier si beaucoup de points (optionnel)
-  // TODO: appliquer DP simplification si nécessaire (pixel tolérance)
+  // Projette polygonsMercBuildings -> projectedBuildings (pixels)
+  projectedBuildings = polygonsMercBuildings.map(ring => ring.map(m => mercatorToPixel(m.x, m.y)));
+
+  // Projette polygonsMercTrees -> projectedTrees (pixels)
+  projectedTrees = polygonsMercTrees.map(ring => ring.map(m => mercatorToPixel(m.x, m.y)));
+
+  // projectedPolygons utilisé par le reste du code (segmentsCache, rendu non-dynamique...)
+  // include trees only if showTrees true
+  projectedPolygons = projectedBuildings.concat(showTrees ? projectedTrees : []);
+  // (optionnel) tu peux appliquer ici une simplification si nécessaire
 }
+
 
 function buildSegmentsCacheFromProjected(){
   // construit segmentsCache = [{a:{x,y}, b:{x,y}, minX,minY,maxX,maxY}, ...]
@@ -341,23 +446,22 @@ function buildSegmentsCacheFromProjected(){
 }
 
 function renderBuildingsToOffscreen(){
-  if(!projectedPolygons) return;
-  // dimensionner offscreen au CSS pixels (devicePixelRatio géré dans draw quand on blit)
+  if(!projectedBuildings) return;
   const W = canvas.width / DPR, H = canvas.height / DPR;
-  offscreenBuildings.width = Math.round(canvas.width);   // device pixels
-  offscreenBuildings.height = Math.round(canvas.height); // device pixels
+  offscreenBuildings.width = Math.round(canvas.width);
+  offscreenBuildings.height = Math.round(canvas.height);
   const osctx = offscreenBuildingsCtx;
   osctx.clearRect(0,0,offscreenBuildings.width, offscreenBuildings.height);
-  // on dessine en user-space CSS => appliquer scale DPR
   osctx.save();
   osctx.scale(DPR, DPR);
 
-  // style identique à ton rendu principal
+  // STYLE BÂTIMENTS
   osctx.lineWidth = -2;
   osctx.strokeStyle = 'rgba(44,54,64,0.4)';
   osctx.fillStyle = 'rgba(16,28,38,1)';
 
-  for(const poly of projectedPolygons){
+  // DESSINER UNIQUEMENT LES BÂTIMENTS (projectedBuildings)
+  for(const poly of projectedBuildings){
     osctx.beginPath();
     for(let i=0;i<poly.length;i++){
       const p = poly[i];
@@ -368,11 +472,29 @@ function renderBuildingsToOffscreen(){
     osctx.stroke();
   }
 
+  // DESSINER LES ARBRES seulement si demandé
+  if(showTrees && projectedTrees && projectedTrees.length){
+    osctx.globalCompositeOperation = 'source-over';
+    osctx.lineWidth = 0.8;
+    osctx.fillStyle = 'rgba(12,90,40,0.95)';     // houppier foncé
+    osctx.strokeStyle = 'rgba(30,160,100,0.12)'; // contour léger
+    for(const t of projectedTrees){
+      osctx.beginPath();
+      for(let i=0;i<t.length;i++){
+        const p = t[i];
+        if(i===0) osctx.moveTo(p.x,p.y); else osctx.lineTo(p.x,p.y);
+      }
+      osctx.closePath();
+      osctx.fill();
+      osctx.stroke();
+    }
+  }
+
   // outlines si voulu (faible coût ici car offscreen)
   if(showPolygonsOutline){
     osctx.lineWidth = 0.9;
     osctx.strokeStyle = 'rgba(255,255,255,0.06)';
-    for(const poly of projectedPolygons){
+    for(const poly of projectedBuildings){
       osctx.beginPath();
       for(let i=0;i<poly.length;i++){
         const p = poly[i];
@@ -381,9 +503,13 @@ function renderBuildingsToOffscreen(){
       osctx.closePath();
       osctx.stroke();
     }
+    // si tu veux outlines arbres, tu pourrais aussi itérer projectedTrees lorsque showTrees true
   }
+
   osctx.restore();
 }
+
+
 
 /* simple coarse uniform grid would be next-step; for l'instant on utilise
    AABB prefilter + segmentsCache pour éviter millions d'opérations inutiles */
@@ -403,6 +529,28 @@ const rayCountEl = document.getElementById('rayCount');
 const rayCountLabel = document.getElementById('rayCountLabel');
 const maxDistEl = document.getElementById('maxDist');
 const maxDistLabel = document.getElementById('maxDistLabel');
+
+
+
+// ------ toggle arbres UI hook ------
+const toggleTreesEl = document.getElementById('toggleTrees');
+if(toggleTreesEl){
+  showTrees = toggleTreesEl.checked;
+  toggleTreesEl.addEventListener('change', (e) => {
+showTrees = !!e.target.checked;
+
+// Recomposer polygonsMerc à partir des buffers déjà fetchés
+polygonsMerc = polygonsMercBuildings.concat(showTrees ? polygonsMercTrees : []);
+
+// Reprojection + cache + offscreen
+projectPolygonsToPixels();
+buildSegmentsCacheFromProjected();
+renderBuildingsToOffscreen();
+draw();
+
+  });
+}
+
 
 
 
@@ -687,17 +835,17 @@ function pointInPolygon(px, py, poly){
 }
 
 function isPointInAnyBuilding(px, py){
-  if(!projectedPolygons || projectedPolygons.length === 0) return false;
-  // AABB prefilter pour chaque polygone (gain de perf si beaucoup de polygones)
-  for(const poly of projectedPolygons){
-    // calcule bbox du poly (rapide)
+  if(!projectedBuildings || projectedBuildings.length === 0) return false;
+  for(const poly of projectedBuildings){
+    // bbox rapide
     let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
     for(const p of poly){ if(p.x < minX) minX = p.x; if(p.x > maxX) maxX = p.x; if(p.y < minY) minY = p.y; if(p.y > maxY) maxY = p.y; }
-    if(px < minX || px > maxX || py < minY || py > maxY) continue; // hors bbox -> skip
+    if(px < minX || px > maxX || py < minY || py > maxY) continue;
     if(pointInPolygon(px, py, poly)) return true;
   }
   return false;
 }
+
 
 /* ======================
    computeIsovistFast : utilise segmentsCache & préfiltre AABB
@@ -1261,13 +1409,15 @@ async function fetchBuildingsForView({useViewMercBBox=true, expand=true} = {}){
     const lonlatBbox = getLonLatBBoxFromMercBBox(bboxMerc);
 
     const overpassQuery = `[out:json][timeout:60];
-    (
-      way["building"](${lonlatBbox.south},${lonlatBbox.west},${lonlatBbox.north},${lonlatBbox.east});
-      relation["building"](${lonlatBbox.south},${lonlatBbox.west},${lonlatBbox.north},${lonlatBbox.east});
-    );
-    out body;
-    >;
-    out skel qt;`;
+(
+  way["building"](${lonlatBbox.south},${lonlatBbox.west},${lonlatBbox.north},${lonlatBbox.east});
+  relation["building"](${lonlatBbox.south},${lonlatBbox.west},${lonlatBbox.north},${lonlatBbox.east});
+  node["natural"="tree"](${lonlatBbox.south},${lonlatBbox.west},${lonlatBbox.north},${lonlatBbox.east});
+);
+out body;
+>;
+out skel qt;`;
+
 
     const res = await fetchWithRetry('https://overpass-api.de/api/interpreter', {
       method: 'POST',
@@ -1287,21 +1437,62 @@ async function fetchBuildingsForView({useViewMercBBox=true, expand=true} = {}){
     }
 
     // optional: filter tiny polygons
-    geojson2.features = geojson2.features.filter(f => {
-      try {
-        const coords = (f.geometry.type === 'Polygon') ? f.geometry.coordinates[0] : (f.geometry.type === 'MultiPolygon' ? f.geometry.coordinates[0][0] : []);
-        if(!coords || coords.length < 4) return false;
-        let minx=Infinity, miny=Infinity, maxx=-Infinity, maxy=-Infinity;
-        for(const c of coords){ minx=Math.min(minx,c[0]); maxx=Math.max(maxx,c[0]); miny=Math.min(miny,c[1]); maxy=Math.max(maxy,c[1]); }
-        const bboxArea = (maxx-minx)*(maxy-miny);
-        return bboxArea > 1e-9;
-      } catch(e){ return true; }
-    });
+    // optional: filter tiny polygons (keep Points so trees aren't dropped)
+geojson2.features = geojson2.features.filter(f => {
+  try {
+    if(!f.geometry) return false;
+    // keep points (trees) and other non-polygon geometries
+    if(f.geometry.type === 'Point' || f.geometry.type === 'MultiPoint' || f.geometry.type === 'LineString') {
+      return true;
+    }
+    // only apply tiny-polygon filter to Polygon / MultiPolygon
+    if(f.geometry.type === 'Polygon' || f.geometry.type === 'MultiPolygon'){
+      const coords = (f.geometry.type === 'Polygon') ? f.geometry.coordinates[0] : f.geometry.coordinates[0][0];
+      if(!coords || coords.length < 4) return false;
+      let minx=Infinity, miny=Infinity, maxx=-Infinity, maxy=-Infinity;
+      for(const c of coords){ minx=Math.min(minx,c[0]); maxx=Math.max(maxx,c[0]); miny=Math.min(miny,c[1]); maxy=Math.max(maxy,c[1]); }
+      const bboxArea = (maxx-minx)*(maxy-miny);
+      return bboxArea > 1e-9;
+    }
+    // fallback: keep anything else
+    return true;
+  } catch(e){
+    return true;
+  }
+});
+
 
     // merge touching buildings if mergeTouchingFeatures available
     const mergedGeo = (typeof mergeTouchingFeatures === 'function') ? mergeTouchingFeatures(geojson2) : geojson2;
 
-polygonsMerc = geojsonToMercatorPolygons(mergedGeo);
+
+
+
+
+
+
+// --- Séparer buildings et trees en Mercator ---
+polygonsMercBuildings = geojsonToMercatorPolygons(mergedGeo);
+
+// --- EXTRACT TREES (nodes natural=tree) ---
+treesGeo = (geojson2.features || []).filter(f => f.geometry && f.geometry.type === 'Point' && f.properties && f.properties['natural'] === 'tree');
+
+// Convertir nodes -> arbres (cercles en mercator) en stockant dans polygonsMercTrees
+polygonsMercTrees = treesGeo.map(feat => {
+  const [lon, lat] = feat.geometry.coordinates;
+  const circM = parseCircumferenceMeters(feat.properties);
+  const trunkRadius = circM / (2 * Math.PI); // m
+  const canopyRadiusM = Math.max(trunkRadius * TREE_CANOPY_MULTIPLIER, 1.5); // min canopy 1.5m
+  return createCirclePolygonMerc(lon, lat, canopyRadiusM, TREE_POLY_SEGMENTS);
+});
+
+// Construire polygonsMerc (uniquement pour compatibilité/usage ailleurs)
+// arbres ajoutés seulement si showTrees true
+polygonsMerc = polygonsMercBuildings.concat(showTrees ? polygonsMercTrees : []);
+
+
+
+
 // PROJECTION + CACHE + OFFSCREEN
 projectPolygonsToPixels();
 buildSegmentsCacheFromProjected();
