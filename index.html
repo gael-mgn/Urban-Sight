@@ -311,7 +311,7 @@ const ctx = canvas.getContext('2d');
 let showTrees = true;                 // contrôle d'affichage (lié à la checkbox)
 let treesGeo = [];                    // features nodes (raw) récupérées depuis Overpass
 let treesMerc = [];                   // arbres convertis en cercles (coord mercator)
-const DEFAULT_TREE_CIRCUMFERENCE_M = 1.0; // valeur de référence si pas d'infos (en mètres)
+const DEFAULT_TREE_CIRCUMFERENCE_M = 2; // valeur de référence si pas d'infos (en mètres) ANCIENNEMENT 1mètre
 const TREE_CANOPY_MULTIPLIER = 3.5;   // transforme rayon de tronc -> rayon de houppier approximatif
 const TREE_POLY_SEGMENTS = 18;        // nombre de segments pour approx cercle (collision)
 
